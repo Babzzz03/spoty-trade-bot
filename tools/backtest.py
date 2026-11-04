@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from spotybot.model import predict
 from spotybot.sportmonks import BASE_URL, Match, parse_finished_match
+from tools.cache import cached_get
 
 WARMUP_MATCHES = 5  # each team needs this many prior matches before we score a prediction
 
@@ -37,9 +38,7 @@ async def fetch_results(token: str, start: date, end: date, leagues: list[int]) 
                 params = {"api_token": token, "include": "participants;scores", "per_page": 50, "page": page}
                 if leagues:
                     params["filters"] = "fixtureLeagues:" + ",".join(map(str, leagues))
-                r = await http.get(f"/fixtures/between/{cur}/{chunk_end}", params=params)
-                r.raise_for_status()
-                body = r.json()
+                body = await cached_get(http, f"/fixtures/between/{cur}/{chunk_end}", params, chunk_end)
                 for f in body.get("data") or []:
                     m = parse_finished_match(f)
                     if m:
@@ -51,7 +50,8 @@ async def fetch_results(token: str, start: date, end: date, leagues: list[int]) 
     return sorted(out.values(), key=lambda m: m.kickoff)
 
 
-def run(matches: list[Match]) -> None:
+def walk_forward(matches: list[Match]) -> list[tuple[Match, "Prediction"]]:
+    """Predict each match using only matches played before it (oldest first in, oldest first out)."""
     history: dict[int, list[Match]] = defaultdict(list)  # newest last
     rows = []
     for m in matches:
@@ -65,7 +65,11 @@ def run(matches: list[Match]) -> None:
             rows.append((m, p))
         history[m.home_id].append(m)
         history[m.away_id].append(m)
+    return rows
 
+
+def run(matches: list[Match]) -> None:
+    rows = walk_forward(matches)
     n = len(rows)
     if not n:
         print("Not enough matches to evaluate.")
