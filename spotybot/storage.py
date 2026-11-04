@@ -95,6 +95,23 @@ CREATE TABLE IF NOT EXISTS value_checks (
     settled_at TEXT,
     UNIQUE (chat_id, fixture_id, market, side, line)
 );
+CREATE TABLE IF NOT EXISTS predictions (
+    id {pk},
+    fixture_id BIGINT NOT NULL,
+    created_at TEXT NOT NULL,
+    kickoff TEXT NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    league TEXT NOT NULL,
+    market TEXT NOT NULL,
+    side TEXT NOT NULL,
+    line REAL NOT NULL,
+    prob REAL NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    settled_at TEXT,
+    UNIQUE (fixture_id, market, side, line)
+);
 CREATE TABLE IF NOT EXISTS api_cache (
     cache_key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -150,6 +167,28 @@ class Follow:
 _VC_COLUMNS = ("id, chat_id, fixture_id, created_at, kickoff, home, away, market, side, line, prob, source, odds, "
                "status, settled_at")
 _FOLLOW_COLUMNS = "chat_id, fixture_id, kickoff, home, away, created_at, done"
+
+
+@dataclass
+class PredictionRecord:
+    id: int
+    fixture_id: int
+    created_at: str
+    kickoff: str
+    home: str
+    away: str
+    league: str
+    market: str
+    side: str
+    line: float
+    prob: float
+    source: str
+    status: str
+    settled_at: str | None
+
+
+_PRED_COLUMNS = ("id, fixture_id, created_at, kickoff, home, away, league, market, side, line, prob, source, "
+                 "status, settled_at")
 
 
 class Storage:
@@ -310,3 +349,32 @@ class Storage:
                       "INSERT INTO api_cache (cache_key, value, fetched_at) VALUES (?, ?, ?) "
                       "ON CONFLICT (cache_key) DO UPDATE SET value = excluded.value, fetched_at = excluded.fetched_at",
                       (key, value, _now()))
+
+    # ---------------------------------------------------------------- prediction accuracy tracker
+
+    async def has_predictions(self, fixture_id: int) -> bool:
+        rows = await self._a(self._run, "SELECT 1 FROM predictions WHERE fixture_id = ?", (fixture_id,), True)
+        return bool(rows)
+
+    async def record_prediction(self, *, fixture_id: int, kickoff: str, home: str, away: str, league: str,
+                                market: str, side: str, line: float, prob: float, source: str) -> None:
+        await self._a(self._run,
+                      "INSERT INTO predictions (fixture_id, created_at, kickoff, home, away, league, market, side, "
+                      "line, prob, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT (fixture_id, market, side, line) DO NOTHING",
+                      (fixture_id, _now(), kickoff, home, away, league, market, side, float(line), float(prob), source))
+
+    async def _preds(self, where: str, params: tuple = ()) -> list[PredictionRecord]:
+        rows = await self._a(self._run, f"SELECT {_PRED_COLUMNS} FROM predictions WHERE {where} ORDER BY kickoff",
+                             params, True)
+        return [PredictionRecord(*r) for r in rows]
+
+    async def open_predictions(self) -> list[PredictionRecord]:
+        return await self._preds("status = 'open'")
+
+    async def settled_predictions(self) -> list[PredictionRecord]:
+        return await self._preds("status IN ('won', 'lost', 'push')")
+
+    async def settle_prediction(self, pred_id: int, status: str) -> None:
+        await self._a(self._run, "UPDATE predictions SET status = ?, settled_at = ? WHERE id = ?",
+                      (status, _now(), pred_id))

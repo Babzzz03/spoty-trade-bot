@@ -95,3 +95,42 @@ def settle(sel: Selection, hg: int, ag: int, corners: int | None, cards: int | N
     if total == sel.line:
         return "push"
     return "won" if (total > sel.line) == (sel.side == "Over") else "lost"
+
+
+# ---------------------------------------------------------------- the bot's main picks for a match
+
+GOAL_PICK_MIN = 0.60  # a goals line is only suggested when it is at least this likely
+
+
+def goal_picks(a: Analysis) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """Best Over line = highest line still >= 60% likely; best Under line = lowest line >= 60% likely.
+
+    Returns ((over_line, p), (under_line, p)); either can be None.
+    """
+    rows = {r.line: r.p_over for r in a.goals}
+    over = next(((l, rows[l]) for l in (3.5, 2.5, 1.5, 0.5) if l in rows and rows[l] >= GOAL_PICK_MIN), None)
+    under = next(((l, 1 - rows[l]) for l in (1.5, 2.5, 3.5, 4.5, 5.5) if l in rows and 1 - rows[l] >= GOAL_PICK_MIN),
+                 None)
+    return over, under
+
+
+def main_picks(a: Analysis) -> list[tuple[Selection, float, str]]:
+    """The predictions shown in the simple view, as (selection, probability, source)."""
+    picks: list[tuple[Selection, float, str]] = []
+    top = max(range(3), key=lambda k: a.result_probs[k])
+    picks.append((Selection("Result", ("Home", "Draw", "Away")[top]), a.result_probs[top], a.result_source))
+    src = {r.line: r.source for r in a.goals}
+    over, under = goal_picks(a)
+    if over:
+        picks.append((Selection("Goals", "Over", over[0]), over[1], src.get(over[0], "model")))
+    if under:
+        picks.append((Selection("Goals", "Under", under[0]), under[1], src.get(under[0], "model")))
+    if not over and not under:
+        g = next((r for r in a.goals if r.line == 2.5), None)
+        if g:
+            side, q = ("Over", g.p_over) if g.p_over >= 0.5 else ("Under", 1 - g.p_over)
+            picks.append((Selection("Goals", side, 2.5), q, g.source))
+    if a.btts:
+        side, q = ("Yes", a.btts.p_over) if a.btts.p_over >= 0.5 else ("No", 1 - a.btts.p_over)
+        picks.append((Selection("BTTS", side), q, a.btts.source))
+    return picks

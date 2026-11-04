@@ -13,7 +13,7 @@ from telegram.constants import ParseMode
 from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes,
                           MessageHandler, TypeHandler, filters)
 
-from .alerts import scorecard_text, start_background, value_scorecard_text
+from .alerts import predictions_scorecard_text, scorecard_text, start_background, value_scorecard_text
 from .markets import estimate, parse_selection
 from .analysis import CORNERS_MIN_EDGE, analyse_fixture, best_tips
 from .config import Settings, load_settings
@@ -309,14 +309,15 @@ async def alerts_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _storage(ctx).subscribe(chat_id)
     s = _settings(ctx)
     await update.effective_message.reply_text(
-        f"🔔 Alerts on. Every day at {s.scan_time} ({s.timezone}) I scan today's and tomorrow's matches and "
-        "message you any new corners lead, re-check it 1 hour before kick-off, and send the result after the match.\n"
-        "Leads are experimental: paper-trade them and watch /record.")
+        f"🔔 Alerts on. Every day at {s.scan_time} ({s.timezone}) you'll get the day's predictions, plus any new "
+        "corners lead (re-checked 1 hour before kick-off, result after the match).\n"
+        "The bot also tracks how accurate its predictions are — see /record.")
 
 
 async def record_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     st = _storage(ctx)
-    text = scorecard_text(await st.all_settled(), await st.open_leads(), await st.recent_leads(10))
+    text = predictions_scorecard_text(await st.settled_predictions()) + "\n\n"
+    text += scorecard_text(await st.all_settled(), await st.open_leads(), await st.recent_leads(10))
     text += "\n" + value_scorecard_text(await st.value_checks_for(update.effective_chat.id))
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 

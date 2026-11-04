@@ -6,6 +6,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from .analysis import CORNERS_MIN_EDGE, Analysis, LineRow
+from .markets import goal_picks, main_picks
 from .odds import fair_odds
 from .sportmonks import fixture_teams
 
@@ -166,21 +167,6 @@ def likely_word(p: float) -> str:
     return "most likely, but close"
 
 
-GOAL_PICK_MIN = 0.60  # a goals line is only suggested when it is at least this likely
-
-
-def goal_picks(a: Analysis) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
-    """Best Over line = highest line still >= 60% likely; best Under line = lowest line >= 60% likely.
-
-    Returns ((over_line, p), (under_line, p)); either can be None.
-    """
-    rows = {r.line: r.p_over for r in a.goals}
-    over = next(((l, rows[l]) for l in (3.5, 2.5, 1.5, 0.5) if l in rows and rows[l] >= GOAL_PICK_MIN), None)
-    under = next(((l, 1 - rows[l]) for l in (1.5, 2.5, 3.5, 4.5, 5.5) if l in rows and 1 - rows[l] >= GOAL_PICK_MIN),
-                 None)
-    return over, under
-
-
 def goal_range(over, under) -> str | None:
     lo = int(over[0] + 0.5) if over else None
     hi = int(under[0] - 0.5) if under else None
@@ -194,25 +180,18 @@ def goal_range(over, under) -> str | None:
 
 
 def simple_picks(a: Analysis) -> list[tuple[str, str, str, float]]:
-    """(icon+market, pick, plain words, probability) for the main markets."""
-    names = (f"{a.home} to win", "Draw", f"{a.away} to win")
-    top = max(range(3), key=lambda k: a.result_probs[k])
-    p = a.result_probs[top]
-    picks = [("🏆 Winner", names[top], likely_word(p) if p >= 0.45 else "too close to call", p)]
-    over, under = goal_picks(a)
-    if over:
-        picks.append(("📈 Goals (over)", f"Over {over[0]:g} goals", likely_word(over[1]), over[1]))
-    if under:
-        picks.append(("📉 Goals (under)", f"Under {under[0]:g} goals", likely_word(under[1]), under[1]))
-    if not over and not under:
-        g = next((r for r in a.goals if r.line == 2.5), None)
-        if g:
-            side, q = ("Over 2.5 goals", g.p_over) if g.p_over >= 0.5 else ("Under 2.5 goals", 1 - g.p_over)
-            picks.append(("⚽ Goals", side, likely_word(q), q))
-    if a.btts:
-        side, q = ("Yes", a.btts.p_over) if a.btts.p_over >= 0.5 else ("No", 1 - a.btts.p_over)
-        picks.append(("🤝 Both teams score", side, likely_word(q), q))
-    return picks
+    """(icon+market, pick, plain words, probability) for the main markets (same picks the tracker records)."""
+    out = []
+    for sel, p, _ in main_picks(a):
+        if sel.market == "Result":
+            pick = "Draw" if sel.side == "Draw" else f"{a.home if sel.side == 'Home' else a.away} to win"
+            out.append(("🏆 Winner", pick, likely_word(p) if p >= 0.45 else "too close to call", p))
+        elif sel.market == "Goals":
+            icon = {"Over": "📈 Goals (over)", "Under": "📉 Goals (under)"}[sel.side]
+            out.append((icon, f"{sel.side} {sel.line:g} goals", likely_word(p), p))
+        elif sel.market == "BTTS":
+            out.append(("🤝 Both teams score", sel.side, likely_word(p), p))
+    return out
 
 
 def goals_summary(a: Analysis) -> str | None:

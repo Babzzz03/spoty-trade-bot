@@ -13,11 +13,11 @@ A Telegram bot that uses the [Sportmonks Football API v3](https://docs.sportmonk
 | `/tips [YYYY-MM-DD]` | A predictions overview for a day (default today): the most likely result, over 2.5 goals and any corners lead |
 | `/remind <fixture_id>` | Sends a fresh analysis 1 hour before kick-off, when line-ups are usually out. Also available as a button under each analysis |
 | `/team <name>` | Looks up a team's Sportmonks ID |
-| `/alerts on` / `/alerts off` | Turns automatic alerts on or off. On: a daily scan at `SCAN_TIME` messages you each new corners lead, it's re-checked 1 hour before kick-off, and you get the result after the match |
+| `/alerts on` / `/alerts off` | Turns automatic alerts on or off. On: at `SCAN_TIME` each morning you get **the day's predictions** for every match, plus any new corners lead (re-checked 1 hour before kick-off, with the result after the match) |
 | `/value <fixture_id> <bet> <odds>` | Checks whether the odds you see at your bookmaker (for example SportyBet) beat the **market's fair price**, for any market. Example: `/value 19722750 over2.5 1.35`. Bets you can check: `1 x 2 1x x2 12 over2.5 under3.5 btts btts-no corners-over9.5 cards-under4.5`. Each ✅ check is recorded and settled after the match |
 | `/value <odds>` | Checks the odds for the next corners lead |
 | `/follow <fixture_id>` / `/unfollow` | Live updates: kick-off, goals with the scorer, red cards, half-time and full-time with corners and cards. Also available as a button under each analysis, and automatic for leads when alerts are on. Checks every ~2 minutes, for up to 3 matches at once |
-| `/record` | Scorecards: corners leads, plus your own ✅ value checks settled at the odds you entered |
+| `/record` | **Prediction accuracy**: every match-day prediction (winner, goals over/under, BTTS) is recorded each morning and checked against the real result, then shown as "right X% vs expected Y%". Also shows the corners-leads scorecard and your own ✅ value checks |
 
 ### Reading the analysis
 

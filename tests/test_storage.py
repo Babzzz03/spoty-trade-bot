@@ -70,12 +70,18 @@ def test_scan_alert_and_settle_flow(tmp_path, monkeypatch):
 
         async def fixture_result(self, fid):
             return {"state_id": 5, "statistics": [{"type_id": 34, "location": "home", "data": {"value": 7}},
-                                                  {"type_id": 34, "location": "away", "data": {"value": 5}}]}
+                                                  {"type_id": 34, "location": "away", "data": {"value": 5}},
+                                                  {"type_id": 52, "location": "home", "data": {"value": 2}},
+                                                  {"type_id": 52, "location": "away", "data": {"value": 1}}]}
 
     lead = Lead("Corners", "Over", 9.5, 0.6, 1.95, 2.05, 0.17)
-    fake = SimpleNamespace(home="Celtic", away="Kilmarnock", league="Premiership", kickoff_utc=ko,
-                           fixture={"id": 5, "starting_at": ko}, corners_lead=lead, corners_expected=12.8,
-                           lineups_confirmed=False)
+    N = SimpleNamespace
+    fake = N(home="Celtic", away="Kilmarnock", league="Premiership", kickoff_utc=ko,
+             fixture={"id": 5, "starting_at": ko}, corners_lead=lead, corners_expected=12.8,
+             lineups_confirmed=False, result_probs=[0.6, 0.25, 0.15], result_source="market",
+             goals=[N(line=1.5, p_over=0.85, source="market"), N(line=2.5, p_over=0.62, source="market"),
+                    N(line=3.5, p_over=0.35, source="market")],
+             btts=N(p_over=0.55, source="market"))
 
     async def fake_analyse(client, store, fid):
         return fake
@@ -93,12 +99,26 @@ def test_scan_alert_and_settle_flow(tmp_path, monkeypatch):
         assert await alerts.scan(app) == 0          # nothing new on a second scan
         assert len(sent) == 1 and "Over 9.5 corners" in sent[0][1] and "1.75 or higher" in sent[0][1]
         assert jobs == [f"precheck:{(await storage.lead_for(5)).id}"]
-        # pretend the match was played a while ago, then settle
-        await storage._a(storage._run, "UPDATE leads SET kickoff = '2020-01-01 15:00:00'")
-        assert await alerts.settle(app) == 1
+        # today's main predictions were recorded once: Home win, Over 2.5, Under 3.5, BTTS Yes
+        assert await storage.has_predictions(5)
+        recorded = await storage.open_predictions()
+        assert sorted((p.market, p.side, p.line) for p in recorded) == [
+            ("BTTS", "Yes", 0.0), ("Goals", "Over", 2.5), ("Goals", "Under", 3.5), ("Result", "Home", 0.0)]
+        # the 08:00 run also sends the morning summary
+        await alerts.scan(app, digest=True)
+        assert "Good morning" in sent[-1][1] and "Celtic vs Kilmarnock" in sent[-1][1]
+        assert len(await storage.open_predictions()) == 4  # not recorded twice
+        # pretend the match was played a while ago (2-1, 12 corners), then settle
+        for table in ("leads", "predictions"):
+            await storage._a(storage._run, f"UPDATE {table} SET kickoff = '2020-01-01 15:00:00'")
+        assert await alerts.settle(app) == 5        # 1 lead + 4 predictions
         rec = await storage.lead_for(5)
         assert rec.status == "won" and rec.result_value == 12
-        assert "WON" in sent[-1][1]
+        assert any("WON" in t for _, t in sent)
+        settled = await storage.settled_predictions()
+        assert all(p.status == "won" for p in settled) and len(settled) == 4  # 2-1: home, O2.5, U3.5, BTTS
+        card = alerts.predictions_scorecard_text(settled)
+        assert "Winner: 1/1 right" in card and "All predictions</b>: 4/4" in card
 
     asyncio.run(run())
 
@@ -162,3 +182,12 @@ def test_league_history_saved_and_reused(tmp_path):
         assert len(m1.matches) == len(m2.matches) == 60 and m2.corners is not None
 
     asyncio.run(run())
+
+
+
+def test_split_message_keeps_parts_under_limit():
+    from spotybot.alerts import split_message
+
+    text = "\n\n".join(f"block {i} " + "x" * 300 for i in range(30))
+    parts = split_message(text, limit=1000)
+    assert all(len(p) <= 1000 for p in parts) and "".join(parts).count("block") == 30
