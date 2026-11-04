@@ -131,8 +131,9 @@ def analysis_message(a: Analysis, tz: str) -> str:
     return "\n".join(L)
 
 
-def tips_message(items: list[Analysis], tz: str) -> str:
-    L = ["<b>Today's overview</b>", ""]
+def tips_message(items: list[Analysis], tz: str, day=None) -> str:
+    title = f"Predictions for {day.strftime('%a %d %b')}" if day else "Today's overview"
+    L = [f"<b>{title}</b>", ""]
     for a in items:
         label, p = a.favourite
         line = f"<b>{escape(a.home)} vs {escape(a.away)}</b> ({kickoff_local(a.fixture, tz)})\n" \

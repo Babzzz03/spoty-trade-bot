@@ -274,6 +274,20 @@ async def start_background(app: Application) -> None:
     """Create tables, re-schedule pending pre-checks, and start the daily scan + hourly settling."""
     s, storage = app.bot_data["settings"], _storage(app)
     await storage.init()
+    try:
+        from telegram import BotCommand
+        await app.bot.set_my_commands([
+            BotCommand("upcoming", "Matches in the next 7 days"),
+            BotCommand("tips", "Predictions overview for a day"),
+            BotCommand("predict", "Full analysis of a match"),
+            BotCommand("value", "Check your bookmaker's odds"),
+            BotCommand("follow", "Live updates for a match"),
+            BotCommand("alerts", "Turn lead alerts on/off"),
+            BotCommand("record", "Paper-trading scorecard"),
+            BotCommand("help", "How to use the bot"),
+        ])
+    except Exception:
+        log.warning("couldn't set the command menu", exc_info=True)
     for lead in await storage.open_leads():
         schedule_precheck(app, lead)
     hh, mm = (int(x) for x in s.scan_time.split(":"))

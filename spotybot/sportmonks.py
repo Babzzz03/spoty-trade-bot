@@ -147,6 +147,12 @@ class SportmonksClient:
             params["filters"] = "fixtureLeagues:" + ",".join(map(str, league_ids))
         return await self._get(f"/fixtures/date/{day.isoformat()}", params, paginate=True) or []
 
+    async def fixtures_between(self, start: date, end: date, league_ids: list[int] | None = None) -> list[dict]:
+        params: dict[str, Any] = {"include": "participants;league;state", "per_page": 50}
+        if league_ids:
+            params["filters"] = "fixtureLeagues:" + ",".join(map(str, league_ids))
+        return await self._get(f"/fixtures/between/{start.isoformat()}/{end.isoformat()}", params, paginate=True) or []
+
     async def fixture(self, fixture_id: int) -> dict:
         """One request: teams, league, state, odds (1X2, goals O/U, BTTS, corners, cards), line-ups, referee."""
         return await self._get(f"/fixtures/{fixture_id}", {

@@ -6,10 +6,11 @@ A Telegram bot that uses the [Sportmonks Football API v3](https://docs.sportmonk
 
 | Command | Description |
 |---|---|
-| `/today` | Today's fixtures, with a button per match to analyse it |
+| `/upcoming` | All matches in the next 7 days, grouped by day, with a button per match for its prediction. Each day has a `/tips_YYYYMMDD` link for that day's predictions |
+| `/today` | Today's fixtures, with a button per match to analyse it. On days without matches it shows `/upcoming` |
 | `/fixtures 2026-11-08` | Fixtures on a given date |
 | `/predict <fixture_id>` | Full analysis. Shows probabilities, **fair odds** and the best bookmaker price for the match result, goals lines, BTTS, corners and cards. Also shows form, head-to-head, line-up status and a **verdict** |
-| `/tips` | Overview of today's upcoming fixtures, with any experimental corners leads |
+| `/tips [YYYY-MM-DD]` | A predictions overview for a day (default today): the most likely result, over 2.5 goals and any corners lead |
 | `/remind <fixture_id>` | Sends a fresh analysis 1 hour before kick-off, when line-ups are usually out. Also available as a button under each analysis |
 | `/team <name>` | Looks up a team's Sportmonks ID |
 | `/alerts on` / `/alerts off` | Turns automatic alerts on or off. On: a daily scan at `SCAN_TIME` messages you each new corners lead, it's re-checked 1 hour before kick-off, and you get the result after the match |

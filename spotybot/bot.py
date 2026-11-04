@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
@@ -10,7 +11,7 @@ from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes,
-                          TypeHandler)
+                          MessageHandler, TypeHandler, filters)
 
 from .alerts import scorecard_text, start_background, value_scorecard_text
 from .markets import estimate, parse_selection
@@ -29,10 +30,11 @@ PAGE_SIZE = 8
 
 HELP = (
     "<b>Spoty Trade Bot</b> — football fixture analysis &amp; predictions\n\n"
+    "/upcoming — matches in the next 7 days (tap one for its prediction)\n"
     "/today — today's fixtures (tap one to analyse)\n"
     "/fixtures YYYY-MM-DD — fixtures on a date\n"
     "/predict &lt;fixture_id&gt; — full analysis: probabilities, fair odds, bookmaker prices, verdict\n"
-    "/tips — overview of today's upcoming fixtures\n"
+    "/tips [YYYY-MM-DD] — predictions overview for a day (default today)\n"
     "/remind &lt;fixture_id&gt; — fresh analysis 1 hour before kick-off (line-ups usually out)\n"
     "/alerts on — get new corners leads automatically (morning scan + 1-hour-before check + results)\n"
     "/alerts off — stop alerts\n"
@@ -92,7 +94,11 @@ async def _send_fixture_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE, day
         return
     fixtures.sort(key=lambda f: (f.get("starting_at") or "", (f.get("league") or {}).get("name", "")))
     if not fixtures:
-        await update.effective_message.reply_text(f"No fixtures found for {day.isoformat()} on your plan.")
+        if day == _today(s.timezone):
+            await update.effective_message.reply_text("No matches today in your leagues — here's what's coming up:")
+            await upcoming_cmd(update, ctx)
+        else:
+            await update.effective_message.reply_text(f"No fixtures found for {day.isoformat()} on your plan.")
         return
 
     pages = (len(fixtures) + PAGE_SIZE - 1) // PAGE_SIZE
@@ -123,6 +129,44 @@ async def _send_fixture_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE, day
 
 async def today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_fixture_page(update, ctx, _today(_settings(ctx).timezone), 0, edit=False)
+
+
+UPCOMING_DAYS = 7
+
+
+async def upcoming_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    s = _settings(ctx)
+    start = _today(s.timezone)
+    try:
+        fixtures = await _client(ctx).fixtures_between(start, start + timedelta(days=UPCOMING_DAYS - 1),
+                                                       s.default_league_ids or None)
+    except SportmonksError as e:
+        await update.effective_message.reply_text(f"Couldn't load fixtures: {e}")
+        return
+    fixtures = [f for f in fixtures if f.get("state_id") in (None, 1)]
+    fixtures.sort(key=lambda f: f.get("starting_at") or "")
+    if not fixtures:
+        await update.effective_message.reply_text(f"No matches in the next {UPCOMING_DAYS} days in your leagues.")
+        return
+    tz = ZoneInfo(s.timezone)
+    by_day: dict[str, list[dict]] = {}
+    for f in fixtures:
+        ko = datetime.fromisoformat(f["starting_at"].replace(" ", "T")[:19]).replace(tzinfo=timezone.utc).astimezone(tz)
+        by_day.setdefault(ko.date().isoformat(), []).append(f)
+    lines = [f"<b>Upcoming matches</b> (next {UPCOMING_DAYS} days) — tap one for its prediction", ""]
+    buttons = []
+    for d, fs in by_day.items():
+        lines.append(f"<b>{datetime.fromisoformat(d).strftime('%a %d %b')}</b>  ·  predictions: /tips_{d.replace('-', '')}")
+        for f in fs:
+            league = (f.get("league") or {}).get("name", "")
+            lines.append(f"  {escape(fixture_line(f, s.timezone))}  <i>{escape(league)}</i>")
+            if len(buttons) < 40:
+                buttons.append([InlineKeyboardButton(f"{datetime.fromisoformat(d).strftime('%a')} "
+                                                     f"{fixture_line(f, s.timezone)}"[:60],
+                                                     callback_data=f"p:{f['id']}")])
+        lines.append("")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                                              reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def fixtures_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -209,19 +253,37 @@ async def predict_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_prediction(update, ctx, int(ctx.args[0]))
 
 
+def _tips_day(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> date | None:
+    """Date from '/tips 2026-11-08' or the clickable '/tips_20261108'; default today."""
+    text = (update.effective_message.text or "") if update.effective_message else ""
+    m = re.search(r"/tips_(\d{8})", text)
+    raw = m.group(1) if m else (ctx.args[0] if ctx.args else "")
+    if not raw:
+        return _today(_settings(ctx).timezone)
+    try:
+        return date.fromisoformat(raw) if "-" in raw else datetime.strptime(raw, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
 async def tips(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     s = _settings(ctx)
-    msg = await update.effective_message.reply_text("Scanning today's fixtures… ⏳ (this can take a moment)")
+    day = _tips_day(update, ctx)
+    if day is None:
+        await update.effective_message.reply_text("Date must look like 2026-11-08")
+        return
+    msg = await update.effective_message.reply_text(f"Analysing matches on {day.strftime('%a %d %b')}… ⏳ "
+                                                    "(about 20 s the first time)")
     try:
-        fixtures = await _client(ctx).fixtures_by_date(_today(s.timezone), s.default_league_ids or None)
-        items = await best_tips(_client(ctx), _store(ctx), fixtures)
+        fixtures = await _client(ctx).fixtures_by_date(day, s.default_league_ids or None)
+        items = await best_tips(_client(ctx), _store(ctx), fixtures, top=8)
     except SportmonksError as e:
         await msg.edit_text(f"Couldn't build tips: {e}")
         return
     if not items:
-        await msg.edit_text("No upcoming fixtures today in the leagues on your plan.")
+        await msg.edit_text(f"No upcoming matches on {day.isoformat()} in your leagues. Try /upcoming.")
         return
-    await msg.edit_text(tips_message(items, s.timezone), parse_mode=ParseMode.HTML)
+    await msg.edit_text(tips_message(items, s.timezone, day), parse_mode=ParseMode.HTML)
 
 
 def _storage(ctx: ContextTypes.DEFAULT_TYPE) -> Storage:
@@ -451,6 +513,8 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
     app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("upcoming", upcoming_cmd))
+    app.add_handler(MessageHandler(filters.Regex(r"^/tips_\d{8}"), tips))
     app.add_handler(CommandHandler("fixtures", fixtures_cmd))
     app.add_handler(CommandHandler("predict", predict_cmd))
     app.add_handler(CommandHandler("tips", tips))
