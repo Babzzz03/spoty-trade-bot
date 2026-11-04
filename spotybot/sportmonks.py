@@ -155,8 +155,14 @@ class SportmonksClient:
         })
 
     async def fixture_result(self, fixture_id: int) -> dict:
-        """Fixture state + statistics (corners etc.) for settling leads. Cached 5 minutes."""
-        return await self._get(f"/fixtures/{fixture_id}", {"include": "participants;state;statistics"}, ttl=300)
+        """Fixture state, score and statistics (corners, cards) for settling. Cached 5 minutes."""
+        return await self._get(f"/fixtures/{fixture_id}", {"include": "participants;state;scores;statistics"},
+                               ttl=300)
+
+    async def live_fixture(self, fixture_id: int) -> dict:
+        """Score, statistics and events during a match (cached 30 s)."""
+        return await self._get(f"/fixtures/{fixture_id}",
+                               {"include": "participants;state;scores;statistics;events"}, ttl=30)
 
     async def league_results(self, league_id: int, start: date, end: date) -> list[dict]:
         """Finished league fixtures with statistics and referees, in <=90-day chunks (cached 6 hours)."""

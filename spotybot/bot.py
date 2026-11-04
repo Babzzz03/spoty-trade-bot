@@ -12,12 +12,13 @@ from telegram.constants import ParseMode
 from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes,
                           TypeHandler)
 
-from .alerts import scorecard_text, start_background
+from .alerts import scorecard_text, start_background, value_scorecard_text
+from .markets import estimate, parse_selection
 from .analysis import CORNERS_MIN_EDGE, analyse_fixture, best_tips
 from .config import Settings, load_settings
 from .formatting import analysis_message, fixture_line, kickoff_local, tips_message
 from .history import HistoryStore
-from .sportmonks import SportmonksClient, SportmonksError
+from .sportmonks import SportmonksClient, SportmonksError, fixture_teams
 from .storage import Storage
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -35,8 +36,11 @@ HELP = (
     "/remind &lt;fixture_id&gt; — fresh analysis 1 hour before kick-off (line-ups usually out)\n"
     "/alerts on — get new corners leads automatically (morning scan + 1-hour-before check + results)\n"
     "/alerts off — stop alerts\n"
-    "/value &lt;odds&gt; — is the odds you see on SportyBet good for the next lead? "
-    "(or /value &lt;fixture_id&gt; &lt;odds&gt;)\n"
+    "/value &lt;fixture_id&gt; &lt;bet&gt; &lt;odds&gt; — are the odds you see on SportyBet better than fair? "
+    "Any market, e.g. /value 19722750 over2.5 1.35 (bets: 1 x 2 1x x2 12 over2.5 under3.5 btts btts-no "
+    "corners-over9.5 cards-under4.5)\n"
+    "/value &lt;odds&gt; — check odds for the next corners lead\n"
+    "/follow &lt;fixture_id&gt; — live updates: goals, red cards, half/full-time with corners &amp; cards\n"
     "/record — paper-trading scorecard of all leads\n"
     "/team &lt;name&gt; — find a team's Sportmonks ID\n\n"
     "<b>How to read it:</b> fair odds = 1 ÷ probability. A bet only has value when a bookmaker pays "
@@ -153,8 +157,10 @@ async def _analysis_text(ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, with_b
         return "Something went wrong analysing that fixture.", None
     markup = None
     if with_button and a.fixture.get("state_id") in (None, 1):
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Remind me 1 hour before kick-off",
-                                                             callback_data=f"r:{fixture_id}")]])
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔔 Remind me 1 hour before kick-off", callback_data=f"r:{fixture_id}")],
+            [InlineKeyboardButton("📺 Follow live (goals, cards, corners)", callback_data=f"l:{fixture_id}")],
+        ])
     return analysis_message(a, _settings(ctx).timezone), markup
 
 
@@ -240,7 +246,55 @@ async def alerts_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def record_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     st = _storage(ctx)
     text = scorecard_text(await st.all_settled(), await st.open_leads(), await st.recent_leads(10))
+    text += "\n" + value_scorecard_text(await st.value_checks_for(update.effective_chat.id))
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+VALUE_MIN_EDGE = 0.03  # for selections priced off the bookmaker consensus
+
+
+async def _value_any_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, token: str,
+                            odds: float | None) -> None:
+    sel = parse_selection(token)
+    if sel is None:
+        await update.effective_message.reply_text(
+            "I don't know that bet. Examples: 1, x, 2, 1x, x2, 12, over2.5, under3.5, btts, btts-no, "
+            "corners-over9.5, cards-under4.5")
+        return
+    if odds is None:
+        await update.effective_message.reply_text("Odds must be a number above 1, like 1.85")
+        return
+    try:
+        a = await analyse_fixture(_client(ctx), _store(ctx), fixture_id)
+    except SportmonksError as e:
+        await update.effective_message.reply_text(f"Couldn't analyse that fixture: {e}")
+        return
+    if a.fixture.get("state_id") not in (None, 1):
+        await update.effective_message.reply_text("That match has already started — pre-match prices only.")
+        return
+    est = estimate(a, sel)
+    if est is None:
+        await update.effective_message.reply_text(f"No estimate for {sel.label} in this match. Try another line.")
+        return
+    p, edge = est.prob, est.prob * odds - 1
+    fair = 1 / p
+    lines = [f"<b>{escape(a.home)} vs {escape(a.away)}</b>: {escape(sel.label)}",
+             f"Chance {p:.0%} · fair odds {fair:.2f} · take only at <b>{(1 + VALUE_MIN_EDGE) / p:.2f}+</b>"]
+    if est.source == "model":
+        lines.append(f"Your odds {odds:.2f} → {'🟡 above' if edge > 0 else '❌ below'} our model's fair odds "
+                     f"({edge:+.0%}), but too few bookmakers price this line to confirm it. "
+                     "Our model alone is unproven: treat as no bet.")
+    elif edge >= VALUE_MIN_EDGE:
+        lines.append(f"Your odds {odds:.2f} → ✅ <b>Value</b>: {edge:+.0%} vs the market's fair price.")
+        await _storage(ctx).record_value_check(
+            chat_id=update.effective_chat.id, fixture_id=fixture_id, kickoff=a.kickoff_utc, home=a.home,
+            away=a.away, market=sel.market, side=sel.side, line=sel.line, prob=p, source=est.source, odds=odds)
+        lines.append("<i>Recorded on your /record scorecard — it settles after the match.</i>")
+    elif edge > 0:
+        lines.append(f"Your odds {odds:.2f} → 🟡 Marginal ({edge:+.0%}): under our {VALUE_MIN_EDGE:.0%} safety margin. Skip.")
+    else:
+        lines.append(f"Your odds {odds:.2f} → ❌ No value ({edge:+.0%}). Skip.")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 def _parse_odds(raw: str) -> float | None:
@@ -255,6 +309,9 @@ async def value_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     args = ctx.args or []
     st = _storage(ctx)
     lead = None
+    if len(args) == 3 and args[0].isdigit():
+        await _value_any_market(update, ctx, int(args[0]), args[1], _parse_odds(args[2]))
+        return
     if len(args) == 2 and args[0].isdigit():
         odds = _parse_odds(args[1])
         lead = await st.lead_for(int(args[0]))
@@ -285,7 +342,10 @@ async def value_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lead = upcoming[0]
         label, prob, teams = lead.label, lead.prob, f"{lead.home} vs {lead.away}"
     else:
-        await update.effective_message.reply_text("Usage: /value <odds>   or   /value <fixture_id> <odds>\nExample: /value 1.85")
+        await update.effective_message.reply_text(
+            "Usage:\n/value <fixture_id> <bet> <odds> — any market, e.g. /value 19722750 over2.5 1.35\n"
+            "/value <odds> — the next corners lead\n"
+            "Bets: 1, x, 2, 1x, x2, 12, over2.5, under3.5, btts, btts-no, corners-over9.5, cards-under4.5")
         return
     if odds is None:
         await update.effective_message.reply_text("Odds must be a number above 1, like 1.85")
@@ -303,6 +363,37 @@ async def value_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"Our chance {prob:.0%} · fair odds {1 / prob:.2f} · take only at <b>{min_price:.2f}+</b>\n"
         f"Your odds {odds:.2f} → {verdict}\n<i>Paper-trade only until /record proves the edge.</i>",
         parse_mode=ParseMode.HTML)
+
+
+async def _follow(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int) -> None:
+    try:
+        f = await _client(ctx).fixture(fixture_id)
+        home, away = (t.get("name", "?") for t in fixture_teams(f))
+    except (SportmonksError, Exception):
+        await update.effective_message.reply_text("Couldn't find that fixture.")
+        return
+    if f.get("state_id") in (5, 7, 8):
+        await update.effective_message.reply_text("That match has already finished.")
+        return
+    await _storage(ctx).follow(update.effective_chat.id, fixture_id, f["starting_at"], home, away)
+    await update.effective_message.reply_text(
+        f"📺 Following {home} vs {away}: kick-off, goals, red cards, half-time and full-time "
+        "(with corners and cards). Updates every ~2 minutes. /unfollow " + str(fixture_id) + " to stop.")
+
+
+async def follow_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /follow <fixture_id>")
+        return
+    await _follow(update, ctx, int(ctx.args[0]))
+
+
+async def unfollow_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /unfollow <fixture_id>")
+        return
+    await _storage(ctx).unfollow(update.effective_chat.id, int(ctx.args[0]))
+    await update.effective_message.reply_text("Stopped following that match.")
 
 
 async def team_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -330,6 +421,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_prediction(update, ctx, int(data[2:]))
     elif data.startswith("r:"):
         await _schedule_reminder(update, ctx, int(data[2:]))
+    elif data.startswith("l:"):
+        await _follow(update, ctx, int(data[2:]))
     elif data.startswith("f:"):
         _, d, page = data.split(":")
         await _send_fixture_page(update, ctx, date.fromisoformat(d), int(page), edit=True)
@@ -366,6 +459,8 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
     app.add_handler(CommandHandler("alerts", alerts_cmd))
     app.add_handler(CommandHandler("record", record_cmd))
     app.add_handler(CommandHandler("value", value_cmd))
+    app.add_handler(CommandHandler("follow", follow_cmd))
+    app.add_handler(CommandHandler("unfollow", unfollow_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_error_handler(on_error)
     return app

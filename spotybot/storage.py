@@ -77,7 +77,74 @@ CREATE TABLE IF NOT EXISTS leads (
     precheck_sent INTEGER NOT NULL DEFAULT 0,
     UNIQUE (fixture_id, market)
 );
+CREATE TABLE IF NOT EXISTS value_checks (
+    id {pk},
+    chat_id BIGINT NOT NULL,
+    fixture_id BIGINT NOT NULL,
+    created_at TEXT NOT NULL,
+    kickoff TEXT NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    market TEXT NOT NULL,
+    side TEXT NOT NULL,
+    line REAL NOT NULL,
+    prob REAL NOT NULL,
+    source TEXT NOT NULL,
+    odds REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    settled_at TEXT,
+    UNIQUE (chat_id, fixture_id, market, side, line)
+);
+CREATE TABLE IF NOT EXISTS follows (
+    chat_id BIGINT NOT NULL,
+    fixture_id BIGINT NOT NULL,
+    kickoff TEXT NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, fixture_id)
+);
 """
+
+
+@dataclass
+class ValueCheck:
+    id: int
+    chat_id: int
+    fixture_id: int
+    created_at: str
+    kickoff: str
+    home: str
+    away: str
+    market: str
+    side: str
+    line: float
+    prob: float
+    source: str
+    odds: float
+    status: str
+    settled_at: str | None
+
+    @property
+    def profit(self) -> float:
+        return {"won": self.odds - 1, "lost": -1.0}.get(self.status, 0.0)
+
+
+@dataclass
+class Follow:
+    chat_id: int
+    fixture_id: int
+    kickoff: str
+    home: str
+    away: str
+    created_at: str
+    done: int
+
+
+_VC_COLUMNS = ("id, chat_id, fixture_id, created_at, kickoff, home, away, market, side, line, prob, source, odds, "
+               "status, settled_at")
+_FOLLOW_COLUMNS = "chat_id, fixture_id, kickoff, home, away, created_at, done"
 
 
 class Storage:
@@ -179,3 +246,49 @@ class Storage:
 
     async def mark_precheck(self, lead_id: int) -> None:
         await self._a(self._run, "UPDATE leads SET precheck_sent = 1 WHERE id = ?", (lead_id,))
+
+    # ---------------------------------------------------------------- value checks (odds the user saw)
+
+    async def record_value_check(self, *, chat_id: int, fixture_id: int, kickoff: str, home: str, away: str,
+                                 market: str, side: str, line: float, prob: float, source: str, odds: float) -> None:
+        await self._a(self._run,
+                      "INSERT INTO value_checks (chat_id, fixture_id, created_at, kickoff, home, away, market, side, "
+                      "line, prob, source, odds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT (chat_id, fixture_id, market, side, line) DO UPDATE SET "
+                      "odds = excluded.odds, prob = excluded.prob, source = excluded.source",
+                      (chat_id, fixture_id, _now(), kickoff, home, away, market, side, float(line), float(prob),
+                       source, float(odds)))
+
+    async def _checks(self, where: str, params: tuple = ()) -> list[ValueCheck]:
+        rows = await self._a(self._run, f"SELECT {_VC_COLUMNS} FROM value_checks WHERE {where} ORDER BY kickoff",
+                             params, True)
+        return [ValueCheck(*r) for r in rows]
+
+    async def open_value_checks(self) -> list[ValueCheck]:
+        return await self._checks("status = 'open'")
+
+    async def value_checks_for(self, chat_id: int) -> list[ValueCheck]:
+        return await self._checks("chat_id = ?", (chat_id,))
+
+    async def settle_value_check(self, check_id: int, status: str) -> None:
+        await self._a(self._run, "UPDATE value_checks SET status = ?, settled_at = ? WHERE id = ?",
+                      (status, _now(), check_id))
+
+    # ---------------------------------------------------------------- live follows
+
+    async def follow(self, chat_id: int, fixture_id: int, kickoff: str, home: str, away: str) -> None:
+        await self._a(self._run,
+                      "INSERT INTO follows (chat_id, fixture_id, kickoff, home, away, created_at) "
+                      "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (chat_id, fixture_id) DO UPDATE SET done = 0",
+                      (chat_id, fixture_id, kickoff, home, away, _now()))
+
+    async def unfollow(self, chat_id: int, fixture_id: int) -> None:
+        await self._a(self._run, "DELETE FROM follows WHERE chat_id = ? AND fixture_id = ?", (chat_id, fixture_id))
+
+    async def active_follows(self) -> list[Follow]:
+        rows = await self._a(self._run, f"SELECT {_FOLLOW_COLUMNS} FROM follows WHERE done = 0 ORDER BY kickoff",
+                             (), True)
+        return [Follow(*r) for r in rows]
+
+    async def finish_follows(self, fixture_id: int) -> None:
+        await self._a(self._run, "UPDATE follows SET done = 1 WHERE fixture_id = ?", (fixture_id,))

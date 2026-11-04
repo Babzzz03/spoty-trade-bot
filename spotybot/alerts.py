@@ -20,7 +20,8 @@ from telegram.ext import Application, ContextTypes
 
 from .analysis import CORNERS_MIN_EDGE, Analysis, analyse_fixture
 from .formatting import kickoff_long
-from .history import STAT_CORNERS
+from .live import snapshot, start_live
+from .markets import Selection, settle as settle_selection
 from .sportmonks import FINISHED_STATE_IDS, SportmonksError
 from .storage import LeadRecord, Storage
 
@@ -104,6 +105,8 @@ async def scan(app: Application, announce: bool = True) -> int:
                 new += 1
                 lead = await storage.lead_for(f["id"])
                 schedule_precheck(app, lead)
+                for chat_id in await storage.subscribers():  # live updates for every lead
+                    await storage.follow(chat_id, f["id"], a.kickoff_utc, a.home, a.away)
                 if announce:
                     await broadcast(app, lead_text(a, s.timezone, "🔔 <b>New corners lead</b>"))
     log.info("scan finished: %d new lead(s)", new)
@@ -160,29 +163,48 @@ def settle_value(side: str, line: float, total: int) -> str:
 
 
 async def settle(app: Application) -> int:
+    """Settle finished corners leads and the user's recorded value checks."""
     client, storage = app.bot_data["client"], _storage(app)
     now = datetime.now(timezone.utc)
     done = 0
-    for lead in await storage.open_leads():
-        ko = _utc(lead.kickoff)
-        if now < ko + SETTLE_AFTER:
-            continue
+    leads = await storage.open_leads()
+    checks = await storage.open_value_checks()
+    due = sorted({x.fixture_id for x in leads + checks if now >= _utc(x.kickoff) + SETTLE_AFTER})
+    for fid in due:
         try:
-            f = await client.fixture_result(lead.fixture_id)
+            f = await client.fixture_result(fid)
         except SportmonksError as e:
-            log.warning("settle %s failed: %s", lead.fixture_id, e)
+            log.warning("settle %s failed: %s", fid, e)
             break
-        corners = [s["data"].get("value") for s in f.get("statistics") or [] if s.get("type_id") == STAT_CORNERS]
-        if f.get("state_id") in FINISHED_STATE_IDS and len(corners) == 2 and all(isinstance(c, int) for c in corners):
-            total = sum(corners)
-            status = settle_value(lead.side, lead.line, total)
-            await storage.settle(lead.id, status, total)
-            icon = {"won": "✅ WON", "lost": "❌ LOST", "push": "➖ PUSH (stake back)"}[status]
-            await broadcast(app, f"📋 <b>Result:</b> {escape(lead.home)} vs {escape(lead.away)} — "
-                                 f"{escape(lead.label)}: <b>{icon}</b> ({total} corners)\nScorecard: /record")
-            done += 1
-        elif now > ko + VOID_AFTER:
-            await storage.settle(lead.id, "void", None)
+        finished = f.get("state_id") in FINISHED_STATE_IDS
+        snap = snapshot(f)
+        corners = sum(snap.corners) if snap.corners is not None else None
+        for lead in (l for l in leads if l.fixture_id == fid):
+            if finished and corners is not None:
+                status = settle_value(lead.side, lead.line, corners)
+                await storage.settle(lead.id, status, corners)
+                icon = {"won": "✅ WON", "lost": "❌ LOST", "push": "➖ PUSH (stake back)"}[status]
+                await broadcast(app, f"📋 <b>Result:</b> {escape(lead.home)} vs {escape(lead.away)} — "
+                                     f"{escape(lead.label)}: <b>{icon}</b> ({corners} corners)\nScorecard: /record")
+                done += 1
+            elif now > _utc(lead.kickoff) + VOID_AFTER:
+                await storage.settle(lead.id, "void", None)
+        for c in (c for c in checks if c.fixture_id == fid):
+            sel = Selection(c.market, c.side, c.line)
+            status = settle_selection(sel, snap.hg, snap.ag, corners, snap.cards) if finished else None
+            if status:
+                await storage.settle_value_check(c.id, status)
+                icon = {"won": "✅ WON", "lost": "❌ LOST", "push": "➖ PUSH"}[status]
+                try:
+                    await app.bot.send_message(
+                        c.chat_id, f"📋 Your value check: {escape(c.home)} vs {escape(c.away)} — "
+                                   f"{escape(sel.label)} @ {c.odds:.2f}: <b>{icon}</b> (final {snap.score})",
+                        parse_mode=ParseMode.HTML)
+                except TelegramError:
+                    log.exception("value-check result to %s failed", c.chat_id)
+                done += 1
+            elif now > _utc(c.kickoff) + VOID_AFTER:
+                await storage.settle_value_check(c.id, "void")
     return done
 
 
@@ -227,6 +249,25 @@ def scorecard_text(settled: list[LeadRecord], open_: list[LeadRecord], recent: l
     return "\n".join(L)
 
 
+def value_scorecard_text(checks) -> str:
+    settled = [c for c in checks if c.status in ("won", "lost", "push")]
+    open_n = sum(c.status == "open" for c in checks)
+    L = ["", "💱 <b>Your ✅ value checks</b> (odds you saw, e.g. on SportyBet; 1 unit each)"]
+    if not settled:
+        L.append(f"None settled yet. Open: {open_n}. Use /value &lt;fixture_id&gt; &lt;bet&gt; &lt;odds&gt;.")
+        return "\n".join(L)
+    n = len(settled)
+    profit = sum(c.profit for c in settled)
+    roi = profit / n
+    sd = math.sqrt(sum((c.profit - roi) ** 2 for c in settled) / max(n - 1, 1))
+    se = sd / math.sqrt(n)
+    won = sum(c.status == "won" for c in settled)
+    L.append(f"Settled {n} (won {won}) · open {open_n} · profit <b>{profit:+.2f} units</b> · ROI {roi:+.1%} ± {se:.1%}")
+    if n < 200:
+        L.append("<i>Too early to judge — aim for 200+.</i>")
+    return "\n".join(L)
+
+
 # ------------------------------------------------------------------ wiring
 
 async def start_background(app: Application) -> None:
@@ -239,4 +280,5 @@ async def start_background(app: Application) -> None:
     app.job_queue.run_daily(_scan_job, time=dtime(hh, mm, tzinfo=ZoneInfo(s.timezone)), name="daily-scan")
     app.job_queue.run_once(_scan_job, when=30, name="startup-scan")
     app.job_queue.run_repeating(_settle_job, interval=3600, first=60, name="settle")
+    start_live(app)
     log.info("Background jobs started (storage: %s, daily scan %s %s)", storage.description, s.scan_time, s.timezone)
