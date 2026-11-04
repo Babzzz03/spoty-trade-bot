@@ -8,37 +8,55 @@ A Telegram bot that uses the [Sportmonks Football API v3](https://docs.sportmonk
 |---|---|
 | `/today` | Today's fixtures, with a button per match to analyse it |
 | `/fixtures 2026-11-08` | Fixtures on a given date |
-| `/predict <fixture_id>` | Full analysis: 1X2, double chance, expected goals, over/under 1.5/2.5/3.5, BTTS, likely scores, form and head-to-head |
-| `/tips` | Scans today's upcoming fixtures and ranks the strongest picks |
+| `/predict <fixture_id>` | Full analysis. Shows probabilities, **fair odds** and the best bookmaker price for the match result, goals lines, BTTS, corners and cards. Also shows form, head-to-head, line-up status and a **verdict** |
+| `/tips` | Overview of today's upcoming fixtures, with any experimental corners leads |
+| `/remind <fixture_id>` | Sends a fresh analysis 1 hour before kick-off, when line-ups are usually out. Also available as a button under each analysis |
 | `/team <name>` | Looks up a team's Sportmonks ID |
 
-## How predictions work
+### Reading the analysis
 
-1. **Team strength:** attack and defence ratings come from each team's last ~12 finished matches. Recent games are weighted more heavily, and the ratings are shrunk toward the average so that small samples don't produce extreme numbers.
-2. **Expected goals:** `xG_home = base_home × attack_home × defence_away`, and the same for the away side.
-3. **Score model:** a Dixon–Coles corrected Poisson matrix over scores from 0–0 to 10–10. All the markets are derived from it.
-4. **Head-to-head:** a small adjustment of at most ±5%.
-5. **Sportmonks Predictions add-on:** when your plan includes it, the model blends Sportmonks' own 1X2 probabilities in at a 35% weight.
+- **Fair odds = 1 ÷ probability.** A bet only has value when a bookmaker pays **more** than the fair odds.
+- **Headline probabilities** come from bookmaker prices with the margin removed, averaged across bookmakers. In testing these were the most accurate numbers available. Our own models are shown alongside them.
+- **The verdict** is based only on what the backtests proved (see below). For the match result, goals and BTTS it says "No bet", because no rule beat bookmaker prices. **Corners leads** are labelled experimental and are for paper-trading only.
+
+## How the models work
+
+- **Team ratings** (`spotybot/ratings.py`). For goals, corners and cards, each team gets an attack factor A and a defence factor D. They're estimated by maximum-a-posteriori Poisson fitting, with exponential time decay (half-life about 87 days) and Gamma shrinkage toward the league average:
+  `expected_home = base_home × A_home × D_away × R_referee` and `expected_away = base_away × A_away × D_home × R_referee`.
+  The referee factor R is used for cards only.
+- **Distributions.** Goals use a Dixon–Coles-corrected Poisson. Corners use a negative binomial, because they're slightly over-dispersed. Cards use a Poisson.
+- **Form model** (`spotybot/model.py`). Recent form and head-to-head give a second opinion on the result and goals.
+- **League history** is downloaded once every 12 hours, about 15 requests per league. Each analysis then needs only **one** request, which keeps the bot within the free plan's limit of 180 requests per hour.
 
 ## How accurate is it?
 
-`tools/backtest.py` replays real past matches. Each prediction uses only data from before kick-off. The results below come from 896 Danish Superliga and Scottish Premiership matches played between Aug 2024 and Nov 2026:
+Every backtest is in `tools/` and replays real past matches using only data available before kick-off. `tools/advanced_backtest.py` tunes its settings on 2024/25 and reports only on later matches (536 test matches from July 2025 to Nov 2026). All betting results are at the **average** bookmaker price.
 
-| Market | Result |
-|---|---|
-| 1X2 pick correct | **51.6%**. Always picking the home team would be 44.9% |
-| Picks at 60% or more | Right about 65–76% of the time. The percentages are well calibrated |
-| Picks at 45–60% | Right about 50% of the time |
-| Best double chance | Right 71–91%, depending on the probability shown |
-| Over/under, BTTS | Only slightly better than the league average. These figures are shrunk toward league rates, so a stated 56% happens about 56% of the time |
+| Market | Our model vs bookmakers | Betting result (test period) |
+|---|---|---|
+| Match result (1X2) | Bookmakers right 57.3%, our model 53.7%. Bookmakers are more accurate | Every rule lost money (−15% to −25%) |
+| Goals over/under, all lines | Bookmakers slightly more accurate. A 30% blend is a hair better | Every rule lost money |
+| Both teams to score | Bookmakers more accurate | Lost money |
+| **Corners**, all lines | A **30% model blend beat the bookmakers** on accuracy | Edge > 5%: **+11% ± 16%** over 126 bets. Promising, but not statistically proven |
+| Cards (with referee) | Bookmakers more accurate. Little data | Roughly break-even, inconclusive |
 
-1X2 has a real but modest edge. Goal markets have very little edge from team form alone. No model makes football results certain, so treat every number as a probability.
+So the bot can show you the **true probability** of each outcome, as well as anything available. It has **no proven way to beat bookmakers**. Corners is the one lead worth tracking forward.
 
-To re-run the backtest:
+To re-run the backtests:
 
 ```bash
-python -m tools.backtest
+python -m tools.advanced_backtest
 ```
+
+```bash
+python -m tools.odds_backtest --leagues 271,501
+```
+
+```bash
+python -m tools.lines_backtest --leagues 271,501
+```
+
+Downloaded pages are cached in `.cache/`.
 
 ## Sportmonks plan coverage
 

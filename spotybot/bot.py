@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -13,7 +13,8 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from .analysis import analyse_fixture, best_tips
 from .config import Settings, load_settings
-from .formatting import fixture_line, kickoff_local, pct, prediction_message
+from .formatting import analysis_message, fixture_line, kickoff_local, tips_message
+from .history import HistoryStore
 from .sportmonks import SportmonksClient, SportmonksError
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -26,12 +27,14 @@ HELP = (
     "<b>Spoty Trade Bot</b> — football fixture analysis &amp; predictions\n\n"
     "/today — today's fixtures (tap one to analyse)\n"
     "/fixtures YYYY-MM-DD — fixtures on a date\n"
-    "/predict &lt;fixture_id&gt; — full analysis of one fixture\n"
-    "/tips — strongest picks among today's upcoming fixtures\n"
+    "/predict &lt;fixture_id&gt; — full analysis: probabilities, fair odds, bookmaker prices, verdict\n"
+    "/tips — overview of today's upcoming fixtures\n"
+    "/remind &lt;fixture_id&gt; — fresh analysis 1 hour before kick-off (line-ups usually out)\n"
     "/team &lt;name&gt; — find a team's Sportmonks ID\n\n"
-    "Predictions use recency-weighted team form, a Dixon–Coles Poisson goal model, "
-    "head-to-head, and Sportmonks predictions when your plan includes them. "
-    "They are probabilities, not certainties."
+    "<b>How to read it:</b> fair odds = 1 ÷ probability. A bet only has value when a bookmaker pays "
+    "MORE than the fair odds. Headline probabilities come from bookmaker prices (they proved most "
+    "accurate in testing); our models for goals, corners and cards (with referee) are shown alongside.\n"
+    "Probabilities, not guarantees."
 )
 
 
@@ -105,20 +108,67 @@ async def fixtures_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_fixture_page(update, ctx, day, 0, edit=False)
 
 
+def _store(ctx: ContextTypes.DEFAULT_TYPE) -> HistoryStore:
+    return ctx.application.bot_data["store"]
+
+
 async def _send_prediction(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int) -> None:
-    msg = await update.effective_message.reply_text("Analysing… ⏳")
+    msg = await update.effective_message.reply_text("Analysing… ⏳ (the first match of a league takes ~20 s)")
+    text, markup = await _analysis_text(ctx, fixture_id)
+    await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def _analysis_text(ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, with_button: bool = True):
     try:
-        fixture, pred = await analyse_fixture(_client(ctx), fixture_id)
+        a = await analyse_fixture(_client(ctx), _store(ctx), fixture_id)
     except SportmonksError as e:
-        await msg.edit_text(f"Couldn't analyse fixture {fixture_id}: {e}")
-        return
+        return f"Couldn't analyse fixture {fixture_id}: {escape(str(e))}", None
     except Exception:
         log.exception("analysis failed for %s", fixture_id)
-        await msg.edit_text("Something went wrong analysing that fixture.")
+        return "Something went wrong analysing that fixture.", None
+    markup = None
+    if with_button and a.fixture.get("state_id") in (None, 1):
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Remind me 1 hour before kick-off",
+                                                             callback_data=f"r:{fixture_id}")]])
+    return analysis_message(a, _settings(ctx).timezone), markup
+
+
+async def _reminder_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id, fixture_id = ctx.job.data
+    text, _ = await _analysis_text(ctx, fixture_id, with_button=False)
+    await ctx.bot.send_message(chat_id, "⏰ <b>Kick-off in about 1 hour</b> — updated analysis:\n\n" + text,
+                               parse_mode=ParseMode.HTML)
+
+
+async def _schedule_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int) -> None:
+    try:
+        fixture = await _client(ctx).fixture(fixture_id)
+        ko = datetime.fromisoformat(fixture["starting_at"].replace(" ", "T")[:19]).replace(tzinfo=timezone.utc)
+    except (SportmonksError, KeyError, ValueError, TypeError):
+        await update.effective_message.reply_text("Couldn't find that fixture's kick-off time.")
         return
-    league = (fixture.get("league") or {}).get("name", "")
-    ko = f"{fixture.get('starting_at', '')[:10]} {kickoff_local(fixture, _settings(ctx).timezone)}"
-    await msg.edit_text(prediction_message(pred, league, ko), parse_mode=ParseMode.HTML)
+    when = ko - timedelta(hours=1)
+    now = datetime.now(timezone.utc)
+    if ko <= now:
+        await update.effective_message.reply_text("That match has already started.")
+        return
+    chat_id = update.effective_chat.id
+    name = f"remind:{chat_id}:{fixture_id}"
+    for job in ctx.job_queue.get_jobs_by_name(name):
+        job.schedule_removal()
+    ctx.job_queue.run_once(_reminder_job, when=max(when, now + timedelta(seconds=5)),
+                           data=(chat_id, fixture_id), name=name)
+    local = when.astimezone(ZoneInfo(_settings(ctx).timezone)).strftime("%a %d %b %H:%M")
+    await update.effective_message.reply_text(
+        f"🔔 I'll send a fresh analysis (with line-ups if they're out) at {local}.\n"
+        "Note: reminders are lost if the server restarts or redeploys.")
+
+
+async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /remind <fixture_id>")
+        return
+    await _schedule_reminder(update, ctx, int(ctx.args[0]))
 
 
 async def predict_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -133,23 +183,14 @@ async def tips(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = await update.effective_message.reply_text("Scanning today's fixtures… ⏳ (this can take a moment)")
     try:
         fixtures = await _client(ctx).fixtures_by_date(_today(s.timezone), s.default_league_ids or None)
-        picks = await best_tips(_client(ctx), fixtures)
+        items = await best_tips(_client(ctx), _store(ctx), fixtures)
     except SportmonksError as e:
         await msg.edit_text(f"Couldn't build tips: {e}")
         return
-    if not picks:
-        await msg.edit_text("No upcoming fixtures with enough data today.")
+    if not items:
+        await msg.edit_text("No upcoming fixtures today in the leagues on your plan.")
         return
-    lines = ["<b>Top picks today</b>", ""]
-    for f, p in picks:
-        pick, prob = p.pick
-        lines.append(
-            f"<b>{escape(p.home)} vs {escape(p.away)}</b> ({kickoff_local(f, s.timezone)})\n"
-            f"  {pick} {pct(prob)} · O2.5 {pct(p.over_25)} · BTTS {pct(p.btts)} · conf: {p.confidence}\n"
-            f"  /predict {f['id']}"
-        )
-    lines += ["", "<i>Probabilities, not guarantees. Bet responsibly.</i>"]
-    await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await msg.edit_text(tips_message(items, s.timezone), parse_mode=ParseMode.HTML)
 
 
 async def team_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -175,6 +216,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     data = q.data or ""
     if data.startswith("p:"):
         await _send_prediction(update, ctx, int(data[2:]))
+    elif data.startswith("r:"):
+        await _schedule_reminder(update, ctx, int(data[2:]))
     elif data.startswith("f:"):
         _, d, page = data.split(":")
         await _send_fixture_page(update, ctx, date.fromisoformat(d), int(page), edit=True)
@@ -195,12 +238,14 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
     app = (builder.updater(None) if webhook else builder.post_shutdown(_shutdown)).build()
     app.bot_data["settings"] = settings
     app.bot_data["client"] = client
+    app.bot_data["store"] = HistoryStore(client)
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("fixtures", fixtures_cmd))
     app.add_handler(CommandHandler("predict", predict_cmd))
     app.add_handler(CommandHandler("tips", tips))
     app.add_handler(CommandHandler("team", team_cmd))
+    app.add_handler(CommandHandler("remind", remind_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_error_handler(on_error)
     return app

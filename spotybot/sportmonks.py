@@ -14,6 +14,9 @@ import httpx
 
 BASE_URL = "https://api.sportmonks.com/v3/football"
 FINISHED_STATE_IDS = {5, 7, 8}  # FT, AET (after extra time), FT_PEN
+# Odds markets: 1 = match result, 80 = goals over/under, 14 = both teams to score,
+# 67 = corners over/under, 255 = cards over/under
+ODDS_MARKETS = (1, 80, 14, 67, 255)
 
 
 class SportmonksError(RuntimeError):
@@ -98,11 +101,12 @@ class SportmonksClient:
     async def close(self) -> None:
         await self._http.aclose()
 
-    async def _get(self, path: str, params: dict | None = None, paginate: bool = False) -> Any:
+    async def _get(self, path: str, params: dict | None = None, paginate: bool = False,
+                   max_pages: int = 10, ttl: int | None = None) -> Any:
         params = dict(params or {})
         key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
         hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < self._ttl:
+        if hit and time.monotonic() - hit[0] < (ttl if ttl is not None else self._ttl):
             return hit[1]
 
         params["api_token"] = self._token
@@ -112,6 +116,9 @@ class SportmonksClient:
             if paginate:
                 params["page"] = page
             r = await self._http.get(path, params=params)
+            if r.status_code == 429:
+                raise SportmonksError("Sportmonks hourly request limit reached (free plan: 180 per hour). "
+                                      "Try again later.")
             if r.status_code != 200:
                 try:
                     msg = r.json().get("message", r.text)
@@ -125,7 +132,7 @@ class SportmonksClient:
                 break
             results.extend(data or [])
             pag = body.get("pagination") or {}
-            if not pag.get("has_more") or page >= 10:
+            if not pag.get("has_more") or page >= max_pages:
                 break
             page += 1
 
@@ -140,17 +147,27 @@ class SportmonksClient:
             params["filters"] = "fixtureLeagues:" + ",".join(map(str, league_ids))
         return await self._get(f"/fixtures/date/{day.isoformat()}", params, paginate=True) or []
 
-    async def fixture(self, fixture_id: int, with_predictions: bool = True) -> dict:
-        includes = "participants;league;state;scores"
-        if with_predictions:
-            includes += ";predictions.type"
-        try:
-            return await self._get(f"/fixtures/{fixture_id}", {"include": includes})
-        except SportmonksError as e:
-            # The Predictions add-on may not be on the plan; retry without it.
-            if with_predictions and ("predictions" in str(e).lower() or "403" in str(e)):
-                return await self._get(f"/fixtures/{fixture_id}", {"include": "participants;league;state;scores"})
-            raise
+    async def fixture(self, fixture_id: int) -> dict:
+        """One request: teams, league, state, odds (1X2, goals O/U, BTTS, corners, cards), line-ups, referee."""
+        return await self._get(f"/fixtures/{fixture_id}", {
+            "include": "participants;league;state;scores;odds;lineups;referees",
+            "filters": "markets:" + ",".join(map(str, ODDS_MARKETS)),
+        })
+
+    async def league_results(self, league_id: int, start: date, end: date) -> list[dict]:
+        """Finished league fixtures with statistics and referees, in <=90-day chunks (cached 6 hours)."""
+        out: list[dict] = []
+        cur = start
+        while cur <= end:
+            chunk_end = min(cur + timedelta(days=90), end)
+            out += await self._get(
+                f"/fixtures/between/{cur.isoformat()}/{chunk_end.isoformat()}",
+                {"include": "participants;statistics;referees", "filters": f"fixtureLeagues:{league_id}",
+                 "per_page": 50},
+                paginate=True, max_pages=30, ttl=6 * 3600,
+            ) or []
+            cur = chunk_end + timedelta(days=1)
+        return out
 
     async def team_recent_matches(self, team_id: int, before: date, days: int = 240, limit: int = 12) -> list[Match]:
         start = before - timedelta(days=days)

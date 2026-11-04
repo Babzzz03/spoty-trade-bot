@@ -4,8 +4,6 @@ from datetime import date
 
 import httpx
 
-from spotybot.analysis import analyse_fixture
-from spotybot.formatting import prediction_message
 from spotybot.model import extract_sportmonks_1x2, predict, score_matrix, team_form
 from spotybot.sportmonks import Match, SportmonksClient, parse_finished_match
 
@@ -51,7 +49,6 @@ def test_strong_team_favoured_and_probs_valid():
     assert p.p_home > 0.6 and p.p_away < 0.15
     assert p.xg_home > p.xg_away
     assert p.pick[0].startswith("1") and p.confidence == "High"
-    assert "<b>Strong vs Weak</b>" in prediction_message(p)
 
 
 def test_shrinkage_on_tiny_sample():
@@ -69,22 +66,59 @@ def test_sportmonks_blend_and_extract():
     assert p.blended_with_sportmonks and abs(p.p_home + p.p_draw + p.p_away - 1) < 1e-9
 
 
+def _stat(type_id, loc, v):
+    return {"type_id": type_id, "location": loc, "data": {"value": v}}
+
+
+def _hist_fixture(fid, hid, aid, hg, ag, hc, ac, when):
+    f = raw_fixture(fid, hid, aid, hg, ag, when=when)
+    f["league_id"] = 271
+    f["statistics"] = [_stat(52, "home", hg), _stat(52, "away", ag), _stat(34, "home", hc), _stat(34, "away", ac),
+                       _stat(84, "home", 2), _stat(84, "away", 1)]
+    f["referees"] = [{"type_id": 6, "referee_id": 77}]
+    return f
+
+
+def _odds(market, label, value, book, total=None):
+    return {"market_id": market, "label": label, "value": str(value), "bookmaker_id": book,
+            "total": None if total is None else str(total)}
+
+
 def test_analyse_fixture_end_to_end_with_mock_api():
-    hist_home = [raw_fixture(100 + i, 10, 30 + i, 2, 0, when=f"2026-09-{i+1:02d} 15:00:00") for i in range(8)]
-    hist_away = [raw_fixture(200 + i, 40 + i, 20, 2, 1, when=f"2026-09-{i+1:02d} 15:00:00") for i in range(8)]
+    from spotybot.analysis import analyse_fixture
+    from spotybot.formatting import analysis_message
+    from spotybot.history import HistoryStore
+
+    teams = [10, 20, 30, 40]
+    hist, fid = [], 100
+    for rnd in range(8):  # 8 rounds of a 4-team league; team 10 strong, lots of corners
+        for h in teams:
+            for a in teams:
+                if h != a and (h + a + rnd) % 2 == 0:
+                    fid += 1
+                    hg, ag = (3, 0) if h == 10 else (0, 2) if a == 10 else (1, 1)
+                    hc, ac = (8, 3) if h == 10 else (3, 7) if a == 10 else (5, 4)
+                    hist.append(_hist_fixture(fid, h, a, hg, ag, hc, ac, f"2026-{3 + rnd:02d}-{1 + fid % 27:02d} 15:00:00"))
     target = raw_fixture(999, 10, 20, state=1, when="2026-11-08 15:00:00")
+    target.update(league_id=271, league={"id": 271, "name": "Test League"}, lineups=[],
+                  referees=[{"type_id": 6, "referee_id": 77}])
+    target["odds"] = (
+        [_odds(1, "Home", 1.50, b) for b in (1, 2, 3)] + [_odds(1, "Draw", 4.2, b) for b in (1, 2, 3)]
+        + [_odds(1, "Away", 6.5, b) for b in (1, 2, 3)]
+        + [_odds(80, "Over", 1.80, b, 2.5) for b in (1, 2, 3)] + [_odds(80, "Under", 2.00, b, 2.5) for b in (1, 2, 3)]
+        + [_odds(67, "Over", 1.90, b, 9.5) for b in (1, 2, 3)] + [_odds(67, "Under", 1.90, b, 9.5) for b in (1, 2, 3)]
+        + [_odds(67, "Over", 1.70, 1, 8.25)]  # quarter line: ignored
+    )
 
     def handler(req: httpx.Request):
         assert req.url.params["api_token"] == "test"
         p = req.url.path
         if p.endswith("/fixtures/999"):
+            assert "odds" in req.url.params["include"]
             return httpx.Response(200, json={"data": target})
-        if "/between/" in p and p.endswith("/10"):
-            return httpx.Response(200, json={"data": hist_home, "pagination": {"has_more": False}})
-        if "/between/" in p and p.endswith("/20"):
-            return httpx.Response(200, json={"data": hist_away, "pagination": {"has_more": False}})
-        if "head-to-head" in p:
-            return httpx.Response(200, json={"data": [raw_fixture(5, 10, 20, 1, 0, when="2026-03-01 15:00:00")]})
+        if "/between/" in p:
+            return httpx.Response(200, json={"data": hist if req.url.params.get("page") == "1" else [],
+                                             "pagination": {"has_more": False}})
         return httpx.Response(404, json={"message": "not found"})
 
     async def run():
@@ -92,14 +126,21 @@ def test_analyse_fixture_end_to_end_with_mock_api():
         c._http = httpx.AsyncClient(base_url="https://api.sportmonks.com/v3/football",
                                     transport=httpx.MockTransport(handler))
         try:
-            return await analyse_fixture(c, 999)
+            return await analyse_fixture(c, HistoryStore(c), 999)
         finally:
             await c.close()
 
-    fx, pred = asyncio.run(run())
-    assert pred.home_form.matches == 8 and pred.away_form.matches == 8
-    assert len(pred.h2h) == 1
-    assert pred.p_home > pred.p_away
+    a = asyncio.run(run())
+    # headline 1X2 comes from bookmakers with the margin removed
+    assert a.result_source == "market"
+    assert abs(sum(a.result_probs) - 1) < 1e-9 and a.result_probs[0] > 0.6
+    assert a.model.home_form.matches >= 5
+    # corners model sees team 10 as a high-corner team
+    assert a.corners_expected and a.corners_expected > 8
+    assert 8.25 not in a.odds.corners and 9.5 in a.odds.corners
+    assert a.referee_known and not a.lineups_confirmed
+    text = analysis_message(a, "Africa/Lagos")
+    assert "Verdict" in text and "fair" in text and "Corners" in text
 
 
 def test_health_and_webhook_routes():
