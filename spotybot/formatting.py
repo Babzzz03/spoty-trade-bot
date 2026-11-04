@@ -154,31 +154,63 @@ def analysis_message(a: Analysis, tz: str) -> str:
     return "\n".join(L)
 
 
+def likely_word(p: float) -> str:
+    if p >= 0.75:
+        return "very likely"
+    if p >= 0.60:
+        return "likely"
+    if p >= 0.50:
+        return "slightly more likely"
+    return "most likely, but close"
+
+
+def simple_picks(a: Analysis) -> list[tuple[str, str, str, float]]:
+    """(icon+market, pick, plain words, probability) for the three main markets."""
+    names = (f"{a.home} to win", "Draw", f"{a.away} to win")
+    top = max(range(3), key=lambda k: a.result_probs[k])
+    p = a.result_probs[top]
+    picks = [("🏆 Winner", names[top], likely_word(p) if p >= 0.45 else "too close to call", p)]
+    g = next((r for r in a.goals if r.line == 2.5), None)
+    if g:
+        side, q = ("Over 2.5 goals", g.p_over) if g.p_over >= 0.5 else ("Under 2.5 goals", 1 - g.p_over)
+        picks.append(("⚽ Goals", side, likely_word(q), q))
+    if a.btts:
+        side, q = ("Yes", a.btts.p_over) if a.btts.p_over >= 0.5 else ("No", 1 - a.btts.p_over)
+        picks.append(("🤝 Both teams score", side, likely_word(q), q))
+    return picks
+
+
+def simple_message(a: Analysis, tz: str) -> str:
+    """The default, easy-to-read prediction."""
+    picks = simple_picks(a)
+    L = [f"⚽ <b>{escape(a.home)} vs {escape(a.away)}</b>",
+         escape(" · ".join(x for x in (kickoff_long(a.fixture, tz), a.league) if x)), "",
+         "🔮 <b>PREDICTION</b>"]
+    for market, pick, words, p in picks:
+        L.append(f"{market}: <b>{escape(pick)}</b> — {words} ({pct(p)})")
+    L += ["", "💰 <b>ONLY BET IF SPORTYBET'S ODDS ARE AT LEAST</b>"]
+    for market, pick, _, p in picks:
+        name = f"Both teams score – {pick}" if market.endswith("Both teams score") else pick
+        L.append(f"  {escape(name)}: <b>{(1 + VALUE_MIN_EDGE) / p:.2f}</b>")
+    L.append("<i>Lower odds than this? Skip it — the price isn't worth the risk.</i>")
+    if a.corners_lead:
+        ld = a.corners_lead
+        L += ["", f"🧪 Corners tip: <b>{ld.side} {ld.line:g} corners</b> ({pct(ld.prob)}) — experimental, "
+                  "track it but don't stake real money yet."]
+    L += ["", "⚠️ <i>These are chances, not certainties. Tap 📊 for all the numbers.</i>"]
+    return "\n".join(L)
+
+
 def tips_message(items: list[Analysis], tz: str, day=None) -> str:
-    title = f"Predictions for {day.strftime('%a %d %b')}" if day else "Today's overview"
-    L = [f"<b>{title}</b>", "<i>👉 more likely side · take at = lowest SportyBet odds worth taking</i>", ""]
+    title = f"Predictions for {day.strftime('%a %d %b')}" if day else "Today's predictions"
+    L = [f"🔮 <b>{title}</b>", ""]
     for a in items:
-        h, d, w = a.result_probs
-        names = (a.home, "Draw", a.away)
-        top = max(range(3), key=lambda k: a.result_probs[k])
-        block = [f"<b>{escape(a.home)} vs {escape(a.away)}</b> ({kickoff_local(a.fixture, tz)})",
-                 f"  Result: {escape(a.home)} {pct(h)} · Draw {pct(d)} · {escape(a.away)} {pct(w)}"
-                 f"  👉 {escape(names[top])} (take at {take_at(a.result_probs[top])})"]
-        g = next((r for r in a.goals if r.line == 2.5), None)
-        if g:
-            lean = ("Over", g.p_over) if g.p_over >= 0.5 else ("Under", 1 - g.p_over)
-            block.append(f"  Goals 2.5: Over {pct(g.p_over)} · Under {pct(1 - g.p_over)}"
-                         f"  👉 {lean[0]} (take at {take_at(lean[1])})")
-        if a.btts:
-            b = a.btts.p_over
-            lean = ("Yes", b) if b >= 0.5 else ("No", 1 - b)
-            block.append(f"  BTTS: Yes {pct(b)} · No {pct(1 - b)}  👉 {lean[0]} (take at {take_at(lean[1])})")
+        L.append(f"⚽ <b>{escape(a.home)} vs {escape(a.away)}</b> · {kickoff_local(a.fixture, tz)}")
+        for market, pick, words, p in simple_picks(a):
+            L.append(f"   {market}: <b>{escape(pick)}</b> ({pct(p)}) — bet only at {(1 + VALUE_MIN_EDGE) / p:.2f}+")
         if a.corners_lead:
             ld = a.corners_lead
-            block.append(f"  🧪 Corners lead: {ld.side} {ld.line:g} (our chance {pct(ld.prob)}, "
-                         f"take at {(1 + CORNERS_MIN_EDGE) / ld.prob:.2f}+)")
-        block.append(f"  Full analysis: /predict {a.fixture['id']}")
-        L += block + [""]
-    L += ["<i>Likely ≠ worth betting. Only bet a side if SportyBet's odds are at or above its take-at odds "
-          "(check with /value). If not, skip.</i>"]
+            L.append(f"   🧪 Corners tip: {ld.side} {ld.line:g} (experimental)")
+        L += [f"   More: /predict {a.fixture['id']}", ""]
+    L.append("<i>\"bet only at\" = the lowest SportyBet odds worth taking. Lower odds → skip.</i>")
     return "\n".join(L)

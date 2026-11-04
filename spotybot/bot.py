@@ -17,7 +17,7 @@ from .alerts import scorecard_text, start_background, value_scorecard_text
 from .markets import estimate, parse_selection
 from .analysis import CORNERS_MIN_EDGE, analyse_fixture, best_tips
 from .config import Settings, load_settings
-from .formatting import analysis_message, fixture_line, kickoff_local, tips_message
+from .formatting import analysis_message, fixture_line, kickoff_local, simple_message, tips_message
 from .history import HistoryStore
 from .sportmonks import SportmonksClient, SportmonksError, fixture_teams
 from .storage import Storage
@@ -191,7 +191,8 @@ async def _send_prediction(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixtu
     await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
-async def _analysis_text(ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, with_button: bool = True):
+async def _analysis_text(ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, with_button: bool = True,
+                         detailed: bool = False):
     try:
         a = await analyse_fixture(_client(ctx), _store(ctx), fixture_id)
     except SportmonksError as e:
@@ -199,20 +200,28 @@ async def _analysis_text(ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, with_b
     except Exception:
         log.exception("analysis failed for %s", fixture_id)
         return "Something went wrong analysing that fixture.", None
-    markup = None
+    rows = []
+    if not detailed:
+        rows.append([InlineKeyboardButton("📊 Full details (all markets, over & under)", callback_data=f"d:{fixture_id}")])
     if with_button and a.fixture.get("state_id") in (None, 1):
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔔 Remind me 1 hour before kick-off", callback_data=f"r:{fixture_id}")],
-            [InlineKeyboardButton("📺 Follow live (goals, cards, corners)", callback_data=f"l:{fixture_id}")],
-        ])
-    return analysis_message(a, _settings(ctx).timezone), markup
+        rows.append([InlineKeyboardButton("🔔 Remind me 1h before", callback_data=f"r:{fixture_id}"),
+                     InlineKeyboardButton("📺 Follow live", callback_data=f"l:{fixture_id}")])
+    tz = _settings(ctx).timezone
+    text = analysis_message(a, tz) if detailed else simple_message(a, tz)
+    return text, (InlineKeyboardMarkup(rows) if rows else None)
+
+
+async def _send_details(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int) -> None:
+    msg = await update.effective_message.reply_text("Loading details… ⏳")
+    text, markup = await _analysis_text(ctx, fixture_id, with_button=False, detailed=True)
+    await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def _reminder_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id, fixture_id = ctx.job.data
-    text, _ = await _analysis_text(ctx, fixture_id, with_button=False)
-    await ctx.bot.send_message(chat_id, "⏰ <b>Kick-off in about 1 hour</b> — updated analysis:\n\n" + text,
-                               parse_mode=ParseMode.HTML)
+    text, markup = await _analysis_text(ctx, fixture_id, with_button=False)
+    await ctx.bot.send_message(chat_id, "⏰ <b>Kick-off in about 1 hour</b> — updated prediction:\n\n" + text,
+                               parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def _schedule_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int) -> None:
@@ -483,6 +492,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_prediction(update, ctx, int(data[2:]))
     elif data.startswith("r:"):
         await _schedule_reminder(update, ctx, int(data[2:]))
+    elif data.startswith("d:"):
+        await _send_details(update, ctx, int(data[2:]))
     elif data.startswith("l:"):
         await _follow(update, ctx, int(data[2:]))
     elif data.startswith("f:"):
