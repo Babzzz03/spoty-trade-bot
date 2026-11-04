@@ -312,7 +312,7 @@ async def record_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-VALUE_MIN_EDGE = 0.03  # for selections priced off the bookmaker consensus
+from .formatting import VALUE_MIN_EDGE  # noqa: E402  (same margin as the "take at" odds)
 
 
 async def _value_any_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, token: str,

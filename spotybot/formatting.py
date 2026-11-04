@@ -52,15 +52,28 @@ def _nearest(rows: list[LineRow], centre: float | None, k: int) -> list[LineRow]
     return sorted(sorted(rows, key=lambda r: abs(r.line - centre))[:k], key=lambda r: r.line)
 
 
+VALUE_MIN_EDGE = 0.03  # safety margin over the fair price before odds count as value
+
+
+def take_at(p: float) -> str:
+    """Lowest bookmaker odds worth taking for an outcome with probability p (fair odds + 3%)."""
+    return f"{(1 + VALUE_MIN_EDGE) / p:.2f}+" if p > 0.01 else "—"
+
+
+def _side(label: str, p: float, lean: bool) -> str:
+    mark = "👉 " if lean else ""
+    return f"{mark}{label} <b>{pct(p)}</b> → take at {take_at(p)}"
+
+
 def _ou_line(name: str, r: LineRow) -> str:
     p = r.p_over
-    over = f"Over {r.line:g}: <b>{pct(p)}</b> (fair {fair_odds(p)}, {_price(r.odds.yes if r.odds else None)})"
-    under = f"Under: {pct(1 - p)} (fair {fair_odds(1 - p)}, {_price(r.odds.no if r.odds else None)})"
+    over = _side(f"Over {r.line:g}", p, p >= 0.5)
+    under = _side(f"Under {r.line:g}", 1 - p, p < 0.5)
     if r.source == "market":
-        model = f" · model {pct(r.model_over)}" if r.model_over is not None else ""
+        note = f"  <i>(our model: over {pct(r.model_over)})</i>" if r.model_over is not None else ""
     else:
-        model = " <i>(our model; too few bookmaker prices)</i>"
-    return f"  {over} | {under}{model}"
+        note = "  <i>(our model only — unproven)</i>"
+    return f"  {over}{note}\n  {under}"
 
 
 def analysis_message(a: Analysis, tz: str) -> str:
@@ -73,29 +86,35 @@ def analysis_message(a: Analysis, tz: str) -> str:
         "",
         f"<b>Match result</b> <i>({src})</i>",
     ]
-    names = (a.home, "Draw", a.away)
+    names = (f"{a.home} win", "Draw", f"{a.away} win")
+    top = max(range(3), key=lambda k: a.result_probs[k])
     for i, p in enumerate(a.result_probs):
-        side = a.odds.result[i] if a.odds.result else None
-        L.append(f"  {escape(names[i])}: <b>{pct(p)}</b> (fair {fair_odds(p)}, {_price(side)})")
+        L.append("  " + _side(escape(names[i]), p, i == top))
+    h, d, w = a.result_probs
+    dc = {"1X": h + d, "X2": d + w, "12": h + w}
+    best_dc = max(dc, key=dc.get)
+    L.append(f"  Double chance {best_dc}: <b>{pct(dc[best_dc])}</b> → take at {take_at(dc[best_dc])}")
     if a.result_source == "market":
         m = a.model
         L.append(f"  <i>Our model: {pct(m.p_home)} / {pct(m.p_draw)} / {pct(m.p_away)}</i>")
 
     L += ["", f"<b>Goals</b> <i>(our model expects {a.model.xg_home + a.model.xg_away:.1f})</i>"]
-    goal_rows = [r for r in a.goals if r.line in (0.5, 1.5, 2.5, 3.5, 4.5)] or a.goals
-    L += [_ou_line("Goals", r) for r in goal_rows[:5]]
+    goal_rows = [r for r in a.goals if r.line in (1.5, 2.5, 3.5)] or a.goals
+    L += [_ou_line("Goals", r) for r in goal_rows[:3]]
     if a.btts:
         b = a.btts
-        L.append(f"  Both teams score: <b>{pct(b.p_over)}</b> (fair {fair_odds(b.p_over)}, "
-                 f"{_price(b.odds.yes if b.odds else None)})")
+        L += ["", "<b>Both teams to score</b>",
+              "  " + _side("Yes", b.p_over, b.p_over >= 0.5),
+              "  " + _side("No", 1 - b.p_over, b.p_over < 0.5)
+              + (" <i>(our model only — unproven)</i>" if b.source == "model" else "")]
 
     if a.corners:
         L += ["", f"<b>Corners</b> <i>(our model expects {a.corners_expected:.1f})</i>"]
-        L += [_ou_line("Corners", r) for r in _nearest(a.corners, a.corners_expected, 3)]
+        L += [_ou_line("Corners", r) for r in _nearest(a.corners, a.corners_expected, 2)]
     if a.cards:
         ref = "referee factored in" if a.referee_known else "referee not assigned yet"
         L += ["", f"<b>Cards</b> <i>(our model expects {a.cards_expected:.1f}, {ref})</i>"]
-        L += [_ou_line("Cards", r) for r in _nearest(a.cards, a.cards_expected, 2)]
+        L += [_ou_line("Cards", r) for r in _nearest(a.cards, a.cards_expected, 1)]
 
     m = a.model
     L += ["", "<b>Form</b> (last 5, newest first)",
@@ -104,13 +123,17 @@ def analysis_message(a: Analysis, tz: str) -> str:
         L.append("  H2H: " + ", ".join(f"{x.home_goals}-{x.away_goals}" + ("" if x.home_name == a.home else "*")
                                        for x in m.h2h[:4]) + "  <i>(* = played at the other ground)</i>")
 
-    L += ["", "<b>Verdict</b>"]
+    L += ["", "<b>How to choose</b>",
+          "  👉 = the more likely side. But likely ≠ worth betting: compare with SportyBet's odds.",
+          "  ✅ If SportyBet pays <b>at or above</b> the \"take at\" odds, that side is worth it.",
+          "  ❌ If neither side reaches its \"take at\" odds, skip the market.",
+          f"  Check instantly: /value {f['id']} over2.5 1.35",
+          "", "<b>Verdict</b>"]
     if a.result_source == "market":
-        L.append("  Result / goals / BTTS: <b>No bet.</b> In testing on 896 matches, bookmaker prices "
-                 "were more accurate than our models and no rule beat them.")
+        L.append("  Our own models found no edge over bookmakers on result/goals/BTTS (896-match test), so "
+                 "value only exists when SportyBet pays more than the take-at odds.")
     else:
-        L.append("  No bookmaker odds yet. Use the fair odds above: only consider a bet if a bookmaker "
-                 "offers higher odds than the fair odds.")
+        L.append("  No bookmaker odds yet — these numbers come from our model only. Treat them with caution.")
     lead = a.corners_lead
     if lead:
         min_price = (1 + CORNERS_MIN_EDGE) / lead.prob
@@ -126,26 +149,36 @@ def analysis_message(a: Analysis, tz: str) -> str:
                  "own is not proven, so don't treat a gap there as value.</i>")
     if a.data_note:
         L.append(f"  ⚠️ {escape(a.data_note)}")
-    L += ["", "<i>Fair odds = 1 ÷ probability. A bet only has value if the bookmaker pays MORE than the fair "
-              "odds. Probabilities, not guarantees — bet only what you can afford to lose.</i>"]
+    L += ["", "<i>Take-at odds = fair odds (1 ÷ probability) + 3% safety margin. Probabilities, not guarantees — "
+              "bet only what you can afford to lose.</i>"]
     return "\n".join(L)
 
 
 def tips_message(items: list[Analysis], tz: str, day=None) -> str:
     title = f"Predictions for {day.strftime('%a %d %b')}" if day else "Today's overview"
-    L = [f"<b>{title}</b>", ""]
+    L = [f"<b>{title}</b>", "<i>👉 more likely side · take at = lowest SportyBet odds worth taking</i>", ""]
     for a in items:
-        label, p = a.favourite
-        line = f"<b>{escape(a.home)} vs {escape(a.away)}</b> ({kickoff_local(a.fixture, tz)})\n" \
-               f"  Most likely: {escape(label)} {pct(p)} (fair {fair_odds(p)})"
-        o25 = next((r for r in a.goals if r.line == 2.5), None)
-        if o25:
-            line += f" · O2.5 {pct(o25.p_over)}"
+        h, d, w = a.result_probs
+        names = (a.home, "Draw", a.away)
+        top = max(range(3), key=lambda k: a.result_probs[k])
+        block = [f"<b>{escape(a.home)} vs {escape(a.away)}</b> ({kickoff_local(a.fixture, tz)})",
+                 f"  Result: {escape(a.home)} {pct(h)} · Draw {pct(d)} · {escape(a.away)} {pct(w)}"
+                 f"  👉 {escape(names[top])} (take at {take_at(a.result_probs[top])})"]
+        g = next((r for r in a.goals if r.line == 2.5), None)
+        if g:
+            lean = ("Over", g.p_over) if g.p_over >= 0.5 else ("Under", 1 - g.p_over)
+            block.append(f"  Goals 2.5: Over {pct(g.p_over)} · Under {pct(1 - g.p_over)}"
+                         f"  👉 {lean[0]} (take at {take_at(lean[1])})")
+        if a.btts:
+            b = a.btts.p_over
+            lean = ("Yes", b) if b >= 0.5 else ("No", 1 - b)
+            block.append(f"  BTTS: Yes {pct(b)} · No {pct(1 - b)}  👉 {lean[0]} (take at {take_at(lean[1])})")
         if a.corners_lead:
             ld = a.corners_lead
-            line += f"\n  🧪 Corners lead: {ld.side} {ld.line:g} (our chance {pct(ld.prob)}, avg odds {ld.avg_price:.2f})"
-        line += f"\n  /predict {a.fixture['id']}"
-        L.append(line)
-    L += ["", "<i>Most-likely outcomes are not bets: in testing no result/goals rule beat bookmaker prices. "
-              "Corners leads are experimental — paper-trade only.</i>"]
+            block.append(f"  🧪 Corners lead: {ld.side} {ld.line:g} (our chance {pct(ld.prob)}, "
+                         f"take at {(1 + CORNERS_MIN_EDGE) / ld.prob:.2f}+)")
+        block.append(f"  Full analysis: /predict {a.fixture['id']}")
+        L += block + [""]
+    L += ["<i>Likely ≠ worth betting. Only bet a side if SportyBet's odds are at or above its take-at odds "
+          "(check with /value). If not, skip.</i>"]
     return "\n".join(L)
