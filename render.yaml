@@ -1,0 +1,21 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Free web service in webhook mode. Telegram sends each message to the service,
+# which wakes it if it was asleep (the first reply after idle can take ~1 minute).
+services:
+  - type: web
+    name: spoty-trade-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m spotybot.bot
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: SPORTMONKS_API_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: BOT_TIMEZONE
+        value: Africa/Lagos
+      - key: DEFAULT_LEAGUE_IDS
+        value: ""

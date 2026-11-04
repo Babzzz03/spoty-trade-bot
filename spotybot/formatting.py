@@ -45,6 +45,7 @@ def prediction_message(pred: Prediction, league: str = "", kickoff: str = "") ->
     lines += [
         "",
         f"<b>Pick:</b> {pick} — {pct(p)}  (confidence: {pred.confidence})",
+        f"<i>Past picks at this level were right {pred.historical_hit_rate} of the time.</i>",
         f"<b>Safer:</b> Double chance {best_dc} — {pct(dc[best_dc])}",
         "",
         "<b>1X2</b>",
@@ -52,6 +53,7 @@ def prediction_message(pred: Prediction, league: str = "", kickoff: str = "") ->
         f"<b>Expected goals:</b> {pred.xg_home:.2f} – {pred.xg_away:.2f}",
         f"<b>Goals:</b> O1.5 {pct(pred.over_15)} · O2.5 {pct(pred.over_25)} · O3.5 {pct(pred.over_35)}",
         f"<b>BTTS:</b> Yes {pct(pred.btts)} · No {pct(1 - pred.btts)}",
+        "<i>Goal markets are hard to predict: these stay close to the league average.</i>",
         "<b>Likely scores:</b> " + ", ".join(f"{s} ({pct(q)})" for s, q in pred.top_scores),
         "",
         "<b>Form (last 5, newest first)</b>",

@@ -1,7 +1,9 @@
 """Telegram bot entry point.  Run with:  python -m spotybot.bot"""
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from datetime import date, datetime
 from html import escape
 from zoneinfo import ZoneInfo
@@ -205,8 +207,24 @@ def build_app(settings: Settings) -> Application:
 
 def main() -> None:
     settings = load_settings()
-    log.info("Starting Spoty Trade Bot (tz=%s)", settings.timezone)
-    build_app(settings).run_polling(allowed_updates=Update.ALL_TYPES)
+    app = build_app(settings)
+    # Webhook mode on a web host (Render sets RENDER_EXTERNAL_URL automatically for web services).
+    base_url = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    if base_url:
+        secret = hashlib.sha256(settings.telegram_token.encode()).hexdigest()[:32]
+        port = int(os.getenv("PORT", "10000"))
+        log.info("Starting Spoty Trade Bot in webhook mode on port %s (tz=%s)", port, settings.timezone)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=f"telegram/{secret}",
+            webhook_url=f"{base_url}/telegram/{secret}",
+            secret_token=secret,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        log.info("Starting Spoty Trade Bot in polling mode (tz=%s)", settings.timezone)
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

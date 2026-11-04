@@ -24,6 +24,15 @@ SHRINK_MATCHES = 4.0    # pseudo-matches of "average" added to each estimate
 RHO = -0.08             # Dixon-Coles low-score dependence
 MAX_GOALS = 10
 
+# Goal markets: a walk-forward backtest on ~900 real Danish Superliga + Scottish Premiership
+# matches showed form-based goal totals barely beat the league-average rate. The best-scoring
+# setting was 30% model / 70% league average, so goal-market probabilities are shrunk this way.
+GOALS_MODEL_WEIGHT = 0.30
+GOALS_PRIORS = {"over_15": 0.80, "over_25": 0.58, "over_35": 0.36, "btts": 0.57}
+
+# Measured in the same backtest: how often the main 1X2 pick was right, by its probability.
+PICK_HIT_RATES = [(0.60, "about 65–75%"), (0.45, "about 50%"), (0.0, "about 40%")]
+
 
 @dataclass
 class TeamForm:
@@ -75,9 +84,15 @@ class Prediction:
             return "Low (limited data)"
         if p >= 0.60:
             return "High"
-        if p >= 0.48:
+        if p >= 0.45:
             return "Medium"
         return "Low"
+
+    @property
+    def historical_hit_rate(self) -> str:
+        """How often picks at this probability level were right in the backtest."""
+        _, p = self.pick
+        return next(label for threshold, label in PICK_HIT_RATES if p >= threshold)
 
 
 def team_form(team_id: int, matches: list[Match]) -> TeamForm:
@@ -177,6 +192,9 @@ def predict(
         return sum(mat[h][a] for h in range(n) for a in range(n) if h + a > line)
 
     btts = sum(mat[h][a] for h in range(1, n) for a in range(1, n))
+
+    def shrink(q: float, market: str) -> float:
+        return GOALS_MODEL_WEIGHT * q + (1 - GOALS_MODEL_WEIGHT) * GOALS_PRIORS[market]
     scores = sorted(((f"{h}-{a}", mat[h][a]) for h in range(n) for a in range(n)), key=lambda x: -x[1])[:3]
 
     notes = []
@@ -200,10 +218,10 @@ def predict(
         p_home=p_home,
         p_draw=p_draw,
         p_away=p_away,
-        over_15=over(1.5),
-        over_25=over(2.5),
-        over_35=over(3.5),
-        btts=btts,
+        over_15=shrink(over(1.5), "over_15"),
+        over_25=shrink(over(2.5), "over_25"),
+        over_35=shrink(over(3.5), "over_35"),
+        btts=shrink(btts, "btts"),
         top_scores=scores,
         home_form=hf,
         away_form=af,
