@@ -519,8 +519,8 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
         app = builder.post_init(start_background).post_shutdown(_shutdown).build()
     app.bot_data["settings"] = settings
     app.bot_data["client"] = client
-    app.bot_data["store"] = HistoryStore(client)
     app.bot_data["storage"] = Storage(settings.database_url)
+    app.bot_data["store"] = HistoryStore(client, app.bot_data["storage"])
     app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("today", today))

@@ -130,3 +130,35 @@ def test_gatekeeper_blocks_strangers():
     with pytest.raises(ApplicationHandlerStop):
         asyncio.run(gatekeeper(update(2), ctx))
     assert replies and "private bot" in replies[0]
+
+
+def test_league_history_saved_and_reused(tmp_path):
+    """A restart (new HistoryStore) loads history from the database instead of the API."""
+    from spotybot.history import HistoryStore
+
+    def fx(fid, h, a, hg, ag, when):
+        stat = lambda t, loc, v: {"type_id": t, "location": loc, "data": {"value": v}}
+        return {"id": fid, "state_id": 5, "starting_at": when, "league_id": 271,
+                "participants": [{"id": h, "name": f"T{h}", "meta": {"location": "home"}},
+                                 {"id": a, "name": f"T{a}", "meta": {"location": "away"}}],
+                "statistics": [stat(52, "home", hg), stat(52, "away", ag), stat(34, "home", 5), stat(34, "away", 4)],
+                "referees": []}
+
+    raw = [fx(i, 10 + i % 4, 20 + i % 3, i % 3, 1, f"2026-0{1 + i % 9}-1{i % 9} 15:00:00") for i in range(60)]
+    calls = []
+
+    class Client:
+        async def league_results(self, league_id, start, end):
+            calls.append(league_id)
+            return raw
+
+    storage = Storage(None, sqlite_path=str(tmp_path / "h.db"))
+
+    async def run():
+        await storage.init()
+        m1 = await HistoryStore(Client(), storage).league(271)
+        m2 = await HistoryStore(Client(), storage).league(271)  # simulated restart
+        assert calls == [271]
+        assert len(m1.matches) == len(m2.matches) == 60 and m2.corners is not None
+
+    asyncio.run(run())

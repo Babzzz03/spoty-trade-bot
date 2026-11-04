@@ -7,9 +7,10 @@ requests per analysed match. This keeps the bot inside the Sportmonks free-plan 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from .ratings import Obs, Ratings, fit
@@ -131,12 +132,33 @@ def build_league_model(league_id: int, matches: list[FullMatch], as_of: str) -> 
 
 
 class HistoryStore:
-    """Per-league history + ratings, refreshed every REFRESH_SECONDS."""
+    """Per-league history + ratings, refreshed every REFRESH_SECONDS.
 
-    def __init__(self, client: SportmonksClient):
+    The parsed history is also saved in the database (if given), so a restart or redeploy
+    doesn't spend ~25 API requests per league downloading it again.
+    """
+
+    def __init__(self, client: SportmonksClient, storage=None):
         self._client = client
+        self._storage = storage
         self._models: dict[int, LeagueModel] = {}
         self._locks: dict[int, asyncio.Lock] = {}
+
+    async def _load_saved(self, league_id: int) -> tuple[list[FullMatch], float] | None:
+        if self._storage is None:
+            return None
+        try:
+            got = await self._storage.cache_get(f"league_history:{league_id}")
+        except Exception:
+            log.warning("couldn't read saved history for league %s", league_id, exc_info=True)
+            return None
+        if not got:
+            return None
+        value, fetched_at = got
+        fetched = datetime.fromisoformat(fetched_at).replace(tzinfo=timezone.utc).timestamp()
+        if time.time() - fetched > REFRESH_SECONDS:
+            return None
+        return [FullMatch(**m) for m in json.loads(value)], fetched
 
     async def league(self, league_id: int) -> LeagueModel:
         lock = self._locks.setdefault(league_id, asyncio.Lock())
@@ -144,12 +166,25 @@ class HistoryStore:
             cur = self._models.get(league_id)
             if cur and time.time() - cur.loaded_at < REFRESH_SECONDS:
                 return cur
-            end = date.today()
-            start = end - timedelta(days=HISTORY_DAYS)
-            raw = await self._client.league_results(league_id, start, end)
-            matches = sorted((m for m in (parse_full_match(f) for f in raw) if m), key=lambda m: m.kickoff)
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            model = await asyncio.to_thread(build_league_model, league_id, matches, now)
-            log.info("Loaded league %s: %d matches", league_id, len(matches))
+            saved = await self._load_saved(league_id)
+            if saved:
+                matches, fetched = saved
+                model = await asyncio.to_thread(build_league_model, league_id, matches, now)
+                model.loaded_at = fetched
+                log.info("Loaded league %s from saved history: %d matches", league_id, len(matches))
+            else:
+                end = date.today()
+                start = end - timedelta(days=HISTORY_DAYS)
+                raw = await self._client.league_results(league_id, start, end)
+                matches = sorted((m for m in (parse_full_match(f) for f in raw) if m), key=lambda m: m.kickoff)
+                model = await asyncio.to_thread(build_league_model, league_id, matches, now)
+                log.info("Downloaded league %s: %d matches", league_id, len(matches))
+                if self._storage is not None:
+                    try:
+                        await self._storage.cache_set(f"league_history:{league_id}",
+                                                      json.dumps([asdict(m) for m in matches]))
+                    except Exception:
+                        log.warning("couldn't save history for league %s", league_id, exc_info=True)
             self._models[league_id] = model
             return model

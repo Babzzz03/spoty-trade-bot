@@ -97,6 +97,8 @@ class SportmonksClient:
         self._http = httpx.AsyncClient(base_url=BASE_URL, timeout=timeout)
         self._cache: dict[str, tuple[float, Any]] = {}
         self._ttl = cache_ttl
+        self.rate_remaining: int | None = None
+        self._rate_reset_at: float | None = None  # monotonic time when the hourly window resets
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -117,8 +119,12 @@ class SportmonksClient:
                 params["page"] = page
             r = await self._http.get(path, params=params)
             if r.status_code == 429:
-                raise SportmonksError("Sportmonks hourly request limit reached (free plan: 180 per hour). "
-                                      "Try again later.")
+                wait = ""
+                if self._rate_reset_at:
+                    mins = max(1, int((self._rate_reset_at - time.monotonic()) / 60) + 1)
+                    wait = f" It resets in about {mins} minute{'s' if mins != 1 else ''}."
+                raise SportmonksError("The data provider's hourly limit is used up (free plan: 180 requests "
+                                      f"per hour).{wait} Please try again then.")
             if r.status_code != 200:
                 try:
                     msg = r.json().get("message", r.text)
@@ -126,6 +132,10 @@ class SportmonksClient:
                     msg = r.text
                 raise SportmonksError(f"Sportmonks {r.status_code} on {path}: {msg}")
             body = r.json()
+            rl = body.get("rate_limit") or {}
+            if isinstance(rl.get("remaining"), int):
+                self.rate_remaining = rl["remaining"]
+                self._rate_reset_at = time.monotonic() + float(rl.get("resets_in_seconds") or 3600)
             data = body.get("data")
             if not paginate:
                 results = data

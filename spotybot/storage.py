@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS value_checks (
     settled_at TEXT,
     UNIQUE (chat_id, fixture_id, market, side, line)
 );
+CREATE TABLE IF NOT EXISTS api_cache (
+    cache_key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS follows (
     chat_id BIGINT NOT NULL,
     fixture_id BIGINT NOT NULL,
@@ -292,3 +297,16 @@ class Storage:
 
     async def finish_follows(self, fixture_id: int) -> None:
         await self._a(self._run, "UPDATE follows SET done = 1 WHERE fixture_id = ?", (fixture_id,))
+
+    # ---------------------------------------------------------------- persistent API cache
+
+    async def cache_get(self, key: str) -> tuple[str, str] | None:
+        """(value, fetched_at UTC 'YYYY-MM-DD HH:MM:SS') or None."""
+        rows = await self._a(self._run, "SELECT value, fetched_at FROM api_cache WHERE cache_key = ?", (key,), True)
+        return (rows[0][0], rows[0][1]) if rows else None
+
+    async def cache_set(self, key: str, value: str) -> None:
+        await self._a(self._run,
+                      "INSERT INTO api_cache (cache_key, value, fetched_at) VALUES (?, ?, ?) "
+                      "ON CONFLICT (cache_key) DO UPDATE SET value = excluded.value, fetched_at = excluded.fetched_at",
+                      (key, value, _now()))
