@@ -95,3 +95,53 @@ def test_value_check_recorded_and_settled(tmp_path):
         assert "Settled 1 (won 1)" in text
 
     asyncio.run(run())
+
+
+def test_value_buttons_and_typed_odds(monkeypatch):
+    import spotybot.bot as B
+    from spotybot.markets import Selection, parse_selection
+
+    # every button token round-trips to the same bet
+    for sel in (Selection("Result", "Home"), Selection("Result", "Draw"), Selection("Goals", "Under", 3.5),
+                Selection("Goals", "Over", 1.5), Selection("BTTS", "No"), Selection("Corners", "Over", 9.5)):
+        assert parse_selection(B._token(sel)) == sel
+
+    calls, replies = [], []
+
+    async def fake_value(update, ctx, fid, token, odds):
+        calls.append((fid, token, odds))
+
+    async def fake_send_prediction(update, ctx, fid):
+        calls.append(("predict", fid))
+
+    async def fake_menu(update, ctx, fid):
+        calls.append(("menu", fid))
+
+    monkeypatch.setattr(B, "_value_any_market", fake_value)
+    monkeypatch.setattr(B, "_send_prediction", fake_send_prediction)
+    monkeypatch.setattr(B, "_value_menu", fake_menu)
+
+    class Msg:
+        def __init__(self, text):
+            self.text = text
+
+        async def reply_text(self, text, **kw):
+            replies.append(text)
+
+    def upd(text):
+        return SimpleNamespace(effective_message=Msg(text), effective_chat=SimpleNamespace(id=1))
+
+    ctx = SimpleNamespace(user_data={}, args=[])
+
+    async def run():
+        await B._ask_odds(upd(""), ctx, 19713866, "over2.5")
+        assert ctx.user_data["pending_value"] == (19713866, "over2.5") and "Over 2.5 goals" in replies[-1]
+        await B.on_text(upd("abc"), ctx)              # not a number -> asks again, keeps pending
+        assert "just the odds" in replies[-1] and "pending_value" in ctx.user_data
+        await B.on_text(upd("1,85"), ctx)             # comma accepted
+        assert calls[-1] == (19713866, "over2.5", 1.85) and "pending_value" not in ctx.user_data
+        await B.shortcut_cmd(upd("/p_19722747"), ctx)
+        await B.shortcut_cmd(upd("/v_19722747@babz_predict_bot"), ctx)
+        assert calls[-2:] == [("predict", 19722747), ("menu", 19722747)]
+
+    asyncio.run(run())

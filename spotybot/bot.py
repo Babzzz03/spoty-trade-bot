@@ -14,7 +14,7 @@ from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHand
                           MessageHandler, TypeHandler, filters)
 
 from .alerts import predictions_scorecard_text, scorecard_text, start_background, value_scorecard_text
-from .markets import estimate, parse_selection
+from .markets import estimate, main_picks, parse_selection
 from .analysis import CORNERS_MIN_EDGE, analyse_fixture, best_tips
 from .config import Settings, load_settings
 from .formatting import analysis_message, fixture_line, kickoff_local, simple_message, tips_message
@@ -201,6 +201,8 @@ async def _analysis_text(ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, with_b
         log.exception("analysis failed for %s", fixture_id)
         return "Something went wrong analysing that fixture.", None
     rows = []
+    if a.fixture.get("state_id") in (None, 1):
+        rows.append([InlineKeyboardButton("💱 Check SportyBet odds", callback_data=f"v:{fixture_id}")])
     if not detailed:
         rows.append([InlineKeyboardButton("📊 Full details (all markets, over & under)", callback_data=f"d:{fixture_id}")])
     if with_button and a.fixture.get("state_id") in (None, 1):
@@ -415,9 +417,10 @@ async def value_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         label, prob, teams = lead.label, lead.prob, f"{lead.home} vs {lead.away}"
     else:
         await update.effective_message.reply_text(
-            "Usage:\n/value <fixture_id> <bet> <odds> — any market, e.g. /value 19722750 over2.5 1.35\n"
-            "/value <odds> — the next corners lead\n"
-            "Bets: 1, x, 2, 1x, x2, 12, over2.5, under3.5, btts, btts-no, corners-over9.5, cards-under4.5")
+            "Easiest: open a prediction and tap 💱 Check SportyBet odds.\n\n"
+            "Or type: <code>/value 19722750 over2.5 1.85</code> (tap to copy, then edit)\n"
+            "Bets: 1, x, 2, 1x, x2, 12, over2.5, under3.5, btts, btts-no, corners-over9.5, cards-under4.5",
+            parse_mode=ParseMode.HTML)
         return
     if odds is None:
         await update.effective_message.reply_text("Odds must be a number above 1, like 1.85")
@@ -485,6 +488,88 @@ async def team_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+def _token(sel) -> str:
+    """Selection -> the short text /value understands."""
+    if sel.market == "Result":
+        return {"Home": "1", "Draw": "x", "Away": "2"}[sel.side]
+    if sel.market == "Double chance":
+        return sel.side.lower()
+    if sel.market == "BTTS":
+        return "btts" if sel.side == "Yes" else "btts-no"
+    prefix = {"Goals": "", "Corners": "corners-", "Cards": "cards-"}[sel.market]
+    return f"{prefix}{sel.side.lower()}{sel.line:g}"
+
+
+async def _value_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int) -> None:
+    """Show buttons for the bets you can check on this match."""
+    try:
+        a = await analyse_fixture(_client(ctx), _store(ctx), fixture_id)
+    except SportmonksError as e:
+        await update.effective_message.reply_text(f"Couldn't load that match: {e}")
+        return
+    from .markets import Selection
+    options = [sel for sel, _, _ in main_picks(a)]
+    names = {"Home": f"{a.home} win", "Draw": "Draw", "Away": f"{a.away} win"}
+    for side in ("Home", "Draw", "Away"):
+        if Selection("Result", side) not in options:
+            options.append(Selection("Result", side))
+    for line in (1.5, 2.5, 3.5):
+        for side in ("Over", "Under"):
+            sel = Selection("Goals", side, line)
+            if sel not in options and any(r.line == line for r in a.goals):
+                options.append(sel)
+    for side in ("Yes", "No"):
+        if a.btts and Selection("BTTS", side) not in options:
+            options.append(Selection("BTTS", side))
+    if a.corners_lead:
+        options.insert(0, Selection("Corners", a.corners_lead.side, a.corners_lead.line))
+    buttons, row = [], []
+    for sel in options[:14]:
+        label = names[sel.side] if sel.market == "Result" else sel.label
+        row.append(InlineKeyboardButton(label[:30], callback_data=f"vs:{fixture_id}:{_token(sel)}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    await update.effective_message.reply_text(
+        f"💱 <b>{escape(a.home)} vs {escape(a.away)}</b>\nWhich bet do you want to check against SportyBet's odds?",
+        parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def _ask_odds(update: Update, ctx: ContextTypes.DEFAULT_TYPE, fixture_id: int, token: str) -> None:
+    sel = parse_selection(token)
+    ctx.user_data["pending_value"] = (fixture_id, token)
+    await update.effective_message.reply_text(
+        f"Type the SportyBet odds for <b>{escape(sel.label if sel else token)}</b> — just the number, e.g. "
+        "<code>1.85</code>", parse_mode=ParseMode.HTML)
+
+
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Plain messages: the odds after choosing a bet, or a hint."""
+    pending = ctx.user_data.get("pending_value")
+    odds = _parse_odds((update.effective_message.text or "").strip())
+    if pending and odds:
+        ctx.user_data.pop("pending_value", None)
+        await _value_any_market(update, ctx, pending[0], pending[1], odds)
+        return
+    if pending:
+        await update.effective_message.reply_text("Please send just the odds as a number, like 1.85")
+        return
+    await update.effective_message.reply_text("Send /upcoming to see matches, or /help for everything I can do.")
+
+
+async def shortcut_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-tap commands with the match ID built in: /p_123 (prediction), /v_123 (check odds)."""
+    m = re.match(r"^/([pv])_(\d+)", update.effective_message.text or "")
+    if not m:
+        return
+    if m.group(1) == "p":
+        await _send_prediction(update, ctx, int(m.group(2)))
+    else:
+        await _value_menu(update, ctx, int(m.group(2)))
+
+
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -497,6 +582,11 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_details(update, ctx, int(data[2:]))
     elif data.startswith("l:"):
         await _follow(update, ctx, int(data[2:]))
+    elif data.startswith("vs:"):
+        _, fid, token = data.split(":", 2)
+        await _ask_odds(update, ctx, int(fid), token)
+    elif data.startswith("v:"):
+        await _value_menu(update, ctx, int(data[2:]))
     elif data.startswith("f:"):
         _, d, page = data.split(":")
         await _send_fixture_page(update, ctx, date.fromisoformat(d), int(page), edit=True)
@@ -527,6 +617,7 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("upcoming", upcoming_cmd))
     app.add_handler(MessageHandler(filters.Regex(r"^/tips_\d{8}"), tips))
+    app.add_handler(MessageHandler(filters.Regex(r"^/[pv]_\d+"), shortcut_cmd))
     app.add_handler(CommandHandler("fixtures", fixtures_cmd))
     app.add_handler(CommandHandler("predict", predict_cmd))
     app.add_handler(CommandHandler("tips", tips))
@@ -538,6 +629,7 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
     app.add_handler(CommandHandler("follow", follow_cmd))
     app.add_handler(CommandHandler("unfollow", unfollow_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     return app
 

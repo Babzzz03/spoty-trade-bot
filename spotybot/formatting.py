@@ -128,7 +128,7 @@ def analysis_message(a: Analysis, tz: str) -> str:
           "  👉 = the more likely side. But likely ≠ worth betting: compare with SportyBet's odds.",
           "  ✅ If SportyBet pays <b>at or above</b> the \"take at\" odds, that side is worth it.",
           "  ❌ If neither side reaches its \"take at\" odds, skip the market.",
-          f"  Check instantly: /value {f['id']} over2.5 1.35",
+          f"  Check instantly: tap 💱 Check SportyBet odds below, or /v_{f['id']}",
           "", "<b>Verdict</b>"]
     if a.result_source == "market":
         L.append("  Our own models found no edge over bookmakers on result/goals/BTTS (896-match test), so "
@@ -234,6 +234,6 @@ def tips_message(items: list[Analysis], tz: str, day=None) -> str:
         if a.corners_lead:
             ld = a.corners_lead
             L.append(f"   🧪 Corners tip: {ld.side} {ld.line:g} (experimental)")
-        L += [f"   More: /predict {a.fixture['id']}", ""]
+        L += [f"   More: /p_{a.fixture['id']} · check odds: /v_{a.fixture['id']}", ""]
     L.append("<i>\"bet only at\" = the lowest SportyBet odds worth taking. Lower odds → skip.</i>")
     return "\n".join(L)

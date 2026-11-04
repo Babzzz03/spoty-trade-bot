@@ -81,7 +81,7 @@ def lead_text(a: Analysis, tz: str, title: str) -> str:
         f"our model expects {a.corners_expected:.1f} corners)</i>\n"
         f"Line-ups: {'confirmed ✅' if a.lineups_confirmed else 'not out yet'}\n\n"
         f"🧪 Experimental — paper-trade only until /record proves it.\n"
-        f"Full analysis: /predict {a.fixture['id']} · check odds: /value {a.fixture['id']} &lt;odds&gt;"
+        f"Full analysis: /p_{a.fixture['id']} · check SportyBet odds: /v_{a.fixture['id']}"
     )
 
 
