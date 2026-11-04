@@ -15,6 +15,8 @@ class Settings:
     telegram_token: str
     timezone: str = "UTC"
     default_league_ids: list[int] = field(default_factory=list)
+    database_url: str = ""
+    scan_time: str = "08:00"  # local time for the daily scan, HH:MM
 
 
 def load_settings() -> Settings:
@@ -29,4 +31,6 @@ def load_settings() -> Settings:
         telegram_token=tg,
         timezone=os.getenv("BOT_TIMEZONE", "UTC").strip() or "UTC",
         default_league_ids=leagues,
+        database_url=os.getenv("DATABASE_URL", "").strip(),
+        scan_time=os.getenv("SCAN_TIME", "08:00").strip() or "08:00",
     )

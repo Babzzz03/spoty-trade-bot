@@ -12,11 +12,15 @@ A Telegram bot that uses the [Sportmonks Football API v3](https://docs.sportmonk
 | `/tips` | Overview of today's upcoming fixtures, with any experimental corners leads |
 | `/remind <fixture_id>` | Sends a fresh analysis 1 hour before kick-off, when line-ups are usually out. Also available as a button under each analysis |
 | `/team <name>` | Looks up a team's Sportmonks ID |
+| `/alerts on` / `/alerts off` | Turns automatic alerts on or off. On: a daily scan at `SCAN_TIME` messages you each new corners lead, it's re-checked 1 hour before kick-off, and you get the result after the match |
+| `/value <odds>` | Checks whether the odds you see (for example on SportyBet) are good for the next lead. `/value <fixture_id> <odds>` checks a specific match |
+| `/record` | The paper-trading scorecard: every lead, won/lost, profit and ROI ± standard error |
 
 ### Reading the analysis
 
 - **Fair odds = 1 ÷ probability.** A bet only has value when a bookmaker pays **more** than the fair odds.
 - **Headline probabilities** come from bookmaker prices with the margin removed, averaged across bookmakers. In testing these were the most accurate numbers available. Our own models are shown alongside them.
+- **Probabilities from the bookmakers** come from averaging all of them and removing their margin with the **power method**, which corrects for long shots being overpriced. On past matches it was more accurate than simple normalisation. If a line has fewer than 3 bookmakers, or a margin above 9%, the bot shows our model's number instead and labels it.
 - **The verdict** is based only on what the backtests proved (see below). For the match result, goals and BTTS it says "No bet", because no rule beat bookmaker prices. **Corners leads** are labelled experimental and are for paper-trading only.
 
 ## How the models work
@@ -83,6 +87,16 @@ python -m spotybot.bot
 2. In Render, click **New → Blueprint** and select this repo.
 3. When prompted, enter `SPORTMONKS_API_TOKEN` and `TELEGRAM_BOT_TOKEN`.
 4. Deploy. The bot registers its webhook automatically, using the `RENDER_EXTERNAL_URL` that Render sets.
+
+### Keep the scorecard: free Supabase database
+
+Render's free disk is wiped on every restart, so alerts and the scorecard need a database:
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Click **Connect**, choose **Session pooler**, and copy the URI. It looks like `postgresql://postgres.xxxx:[YOUR-PASSWORD]@aws-0-....pooler.supabase.com:5432/postgres`.
+3. Replace `[YOUR-PASSWORD]` with your database password, then add the result in Render as `DATABASE_URL`.
+
+The bot creates its tables automatically. Use the Session pooler, not the direct connection, because Render needs IPv4.
 
 ### Keep it awake
 

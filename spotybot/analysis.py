@@ -25,6 +25,11 @@ from .sportmonks import SportmonksClient, SportmonksError, fixture_teams
 CORNERS_MODEL_WEIGHT = 0.30   # chosen on 2024/25 data by log loss
 CORNERS_MIN_EDGE = 0.05       # expected value threshold at the AVERAGE bookmaker price
 MIN_BOOKS_FOR_LEAD = 3
+# Use a market probability only when enough bookmakers price it and the margin is sane;
+# otherwise (e.g. 2 bookmakers quoting 1.02 / 7.90) fall back to our model.
+MIN_BOOKS_FOR_MARKET = 3
+MAX_OVERROUND = 0.09
+LINEUPS_WINDOW_MIN = 90       # Sportmonks may return predicted XIs days ahead; trust only near kick-off
 
 
 @dataclass
@@ -80,9 +85,18 @@ class Analysis:
         return labels[i], self.result_probs[i]
 
 
+def _usable(o: TwoWay | None) -> TwoWay | None:
+    return o if o and o.books >= MIN_BOOKS_FOR_MARKET and o.overround <= MAX_OVERROUND else None
+
+
 def _lineups_confirmed(fixture: dict) -> bool:
     starters = [p for p in fixture.get("lineups") or [] if p.get("type_id") == 11]
-    return len(starters) >= 20
+    try:
+        ko = datetime.fromisoformat(fixture["starting_at"].replace(" ", "T")[:19]).replace(tzinfo=timezone.utc)
+    except (KeyError, ValueError, AttributeError):
+        return False
+    minutes_to_ko = (ko - datetime.now(timezone.utc)).total_seconds() / 60
+    return len(starters) >= 20 and minutes_to_ko <= LINEUPS_WINDOW_MIN
 
 
 def _main_referee(fixture: dict) -> int | None:
@@ -98,8 +112,9 @@ def _corners_lead(rows: list[LineRow], pmf: list[float]) -> Lead | None:
         p_over, p_under, p_push = over_under(pmf, row.line)
         decided = p_over + p_under
         m_over = p_over / decided if decided else 0.5
-        q_over = (CORNERS_MODEL_WEIGHT * m_over + (1 - CORNERS_MODEL_WEIGHT) * o.prob_yes) * (1 - p_push)
-        q_under = (CORNERS_MODEL_WEIGHT * (1 - m_over) + (1 - CORNERS_MODEL_WEIGHT) * (1 - o.prob_yes)) * (1 - p_push)
+        mkt = o.prob_yes_proportional  # same method as the backtest that produced this rule
+        q_over = (CORNERS_MODEL_WEIGHT * m_over + (1 - CORNERS_MODEL_WEIGHT) * mkt) * (1 - p_push)
+        q_under = (CORNERS_MODEL_WEIGHT * (1 - m_over) + (1 - CORNERS_MODEL_WEIGHT) * (1 - mkt)) * (1 - p_push)
         for side, q, prices in (("Over", q_over, o.yes), ("Under", q_under, o.no)):
             ev = q * prices.avg + p_push - 1
             if ev > CORNERS_MIN_EDGE and (best is None or ev > best.edge):
@@ -125,7 +140,7 @@ def build_analysis(fixture: dict, home: dict, away: dict, lm: LeagueModel, kicko
     a_matches = lm.team_matches(away["id"], kickoff)
     model = predict(home, away, h_matches, a_matches, h2h=lm.head_to_head(home["id"], away["id"], kickoff))
 
-    market_1x2 = odds.result_probs()
+    market_1x2 = odds.result_probs() if odds.result_books >= MIN_BOOKS_FOR_MARKET else None
     a = Analysis(
         fixture=fixture, home=home.get("name", "Home"), away=away.get("name", "Away"),
         league=(fixture.get("league") or {}).get("name", ""), kickoff_utc=kickoff, model=model, odds=odds,
@@ -139,15 +154,13 @@ def build_analysis(fixture: dict, home: dict, away: dict, lm: LeagueModel, kicko
     # Goals lines
     model_goals = {1.5: model.over_15, 2.5: model.over_25, 3.5: model.over_35}
     for line in sorted(set(odds.goals) | set(model_goals)):
-        o = odds.goals.get(line)
-        if o is None and line not in model_goals:
+        o, mk = odds.goals.get(line), _usable(odds.goals.get(line))
+        if mk is None and line not in model_goals:
             continue
-        if o is None and odds.goals:
-            continue  # only show model-only lines when there are no odds at all
-        a.goals.append(LineRow(line, o.prob_yes if o else model_goals[line], "market" if o else "model",
+        a.goals.append(LineRow(line, mk.prob_yes if mk else model_goals[line], "market" if mk else "model",
                                model_goals.get(line), o))
-    a.btts = LineRow(0, odds.btts.prob_yes if odds.btts else model.btts,
-                     "market" if odds.btts else "model", model.btts, odds.btts)
+    bt = _usable(odds.btts)
+    a.btts = LineRow(0, bt.prob_yes if bt else model.btts, "market" if bt else "model", model.btts, odds.btts)
 
     # Corners: rating model (+ market)
     if lm.corners:
@@ -158,8 +171,8 @@ def build_analysis(fixture: dict, home: dict, away: dict, lm: LeagueModel, kicko
         for line in lines:
             po, pu, _ = over_under(pmf, line)
             m_over = po / (po + pu) if po + pu else 0.5
-            o = odds.corners.get(line)
-            a.corners.append(LineRow(line, o.prob_yes if o else m_over, "market" if o else "model", m_over, o))
+            o, mk = odds.corners.get(line), _usable(odds.corners.get(line))
+            a.corners.append(LineRow(line, mk.prob_yes if mk else m_over, "market" if mk else "model", m_over, o))
         a.corners_lead = _corners_lead(a.corners, pmf)
 
     # Cards: rating model with referee factor (information only)
@@ -170,8 +183,8 @@ def build_analysis(fixture: dict, home: dict, away: dict, lm: LeagueModel, kicko
         for line in sorted(odds.cards) or [3.5, 4.5, 5.5]:
             po, pu, _ = over_under(pmf, line)
             m_over = po / (po + pu) if po + pu else 0.5
-            o = odds.cards.get(line)
-            a.cards.append(LineRow(line, o.prob_yes if o else m_over, "market" if o else "model", m_over, o))
+            o, mk = odds.cards.get(line), _usable(odds.cards.get(line))
+            a.cards.append(LineRow(line, mk.prob_yes if mk else m_over, "market" if mk else "model", m_over, o))
     return a
 
 

@@ -56,7 +56,10 @@ def _ou_line(name: str, r: LineRow) -> str:
     p = r.p_over
     over = f"Over {r.line:g}: <b>{pct(p)}</b> (fair {fair_odds(p)}, {_price(r.odds.yes if r.odds else None)})"
     under = f"Under: {pct(1 - p)} (fair {fair_odds(1 - p)}, {_price(r.odds.no if r.odds else None)})"
-    model = f" · model {pct(r.model_over)}" if r.model_over is not None and r.source == "market" else ""
+    if r.source == "market":
+        model = f" · model {pct(r.model_over)}" if r.model_over is not None else ""
+    else:
+        model = " <i>(our model; too few bookmaker prices)</i>"
     return f"  {over} | {under}{model}"
 
 
@@ -117,6 +120,10 @@ def analysis_message(a: Analysis, tz: str) -> str:
         L.append("  <i>Not proven yet (+11% ± 16% in testing). Paper-trade it — record it, don't stake real money.</i>")
     elif a.corners:
         L.append("  Corners: no lead for this match.")
+    model_only = any(r.source == "model" for r in a.goals + a.corners + a.cards) or (a.btts and a.btts.source == "model")
+    if model_only and a.result_source == "market":
+        L.append("  <i>Lines marked \"our model\" have too few bookmaker prices to check against; our model on its "
+                 "own is not proven, so don't treat a gap there as value.</i>")
     if a.data_note:
         L.append(f"  ⚠️ {escape(a.data_note)}")
     L += ["", "<i>Fair odds = 1 ÷ probability. A bet only has value if the bookmaker pays MORE than the fair "

@@ -156,3 +156,14 @@ def test_health_and_webhook_routes():
     assert client.get("/").status_code == 200
     assert client.post("/telegram/s3cret", json={}, headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"}).status_code == 403
     assert client.post("/telegram/other", json={}).status_code == 404
+
+
+def test_power_margin_removal():
+    from spotybot.odds import Side, TwoWay, power_normalise
+
+    p = power_normalise([1 / 1.25, 1 / 6.0, 1 / 13.0])
+    assert abs(sum(p) - 1) < 1e-9
+    prop = [x / sum([1 / 1.25, 1 / 6.0, 1 / 13.0]) for x in (1 / 1.25, 1 / 6.0, 1 / 13.0)]
+    assert p[0] > prop[0] and p[2] < prop[2]  # long shot carries more of the margin
+    tw = TwoWay(Side([1.02, 1.02]), Side([7.9, 7.9]))
+    assert tw.overround > 0.09  # too much margin -> analysis falls back to our model

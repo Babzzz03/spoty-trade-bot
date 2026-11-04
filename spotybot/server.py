@@ -56,6 +56,8 @@ async def run_webhook_server(app: Application, base_url: str, port: int, telegra
             url=f"{base_url}/telegram/{secret}", secret_token=secret, allowed_updates=Update.ALL_TYPES
         )
         await app.start()
+        from .alerts import start_background
+        await start_background(app)
         log.info("Webhook set; health check at %s/health", base_url)
         try:
             await server.serve()

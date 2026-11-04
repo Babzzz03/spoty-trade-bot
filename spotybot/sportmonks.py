@@ -154,6 +154,10 @@ class SportmonksClient:
             "filters": "markets:" + ",".join(map(str, ODDS_MARKETS)),
         })
 
+    async def fixture_result(self, fixture_id: int) -> dict:
+        """Fixture state + statistics (corners etc.) for settling leads. Cached 5 minutes."""
+        return await self._get(f"/fixtures/{fixture_id}", {"include": "participants;state;statistics"}, ttl=300)
+
     async def league_results(self, league_id: int, start: date, end: date) -> list[dict]:
         """Finished league fixtures with statistics and referees, in <=90-day chunks (cached 6 hours)."""
         out: list[dict] = []

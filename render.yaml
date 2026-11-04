@@ -19,3 +19,7 @@ services:
         value: Africa/Lagos
       - key: DEFAULT_LEAGUE_IDS
         value: ""
+      - key: DATABASE_URL        # Supabase "Session pooler" connection string (keeps the scorecard)
+        sync: false
+      - key: SCAN_TIME           # daily lead scan, local time
+        value: "08:00"

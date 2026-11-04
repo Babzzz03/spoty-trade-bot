@@ -11,11 +11,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
-from .analysis import analyse_fixture, best_tips
+from .alerts import scorecard_text, start_background
+from .analysis import CORNERS_MIN_EDGE, analyse_fixture, best_tips
 from .config import Settings, load_settings
 from .formatting import analysis_message, fixture_line, kickoff_local, tips_message
 from .history import HistoryStore
 from .sportmonks import SportmonksClient, SportmonksError
+from .storage import Storage
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)  # keep the API token out of logs
@@ -30,6 +32,11 @@ HELP = (
     "/predict &lt;fixture_id&gt; — full analysis: probabilities, fair odds, bookmaker prices, verdict\n"
     "/tips — overview of today's upcoming fixtures\n"
     "/remind &lt;fixture_id&gt; — fresh analysis 1 hour before kick-off (line-ups usually out)\n"
+    "/alerts on — get new corners leads automatically (morning scan + 1-hour-before check + results)\n"
+    "/alerts off — stop alerts\n"
+    "/value &lt;odds&gt; — is the odds you see on SportyBet good for the next lead? "
+    "(or /value &lt;fixture_id&gt; &lt;odds&gt;)\n"
+    "/record — paper-trading scorecard of all leads\n"
     "/team &lt;name&gt; — find a team's Sportmonks ID\n\n"
     "<b>How to read it:</b> fair odds = 1 ÷ probability. A bet only has value when a bookmaker pays "
     "MORE than the fair odds. Headline probabilities come from bookmaker prices (they proved most "
@@ -193,6 +200,93 @@ async def tips(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await msg.edit_text(tips_message(items, s.timezone), parse_mode=ParseMode.HTML)
 
 
+def _storage(ctx: ContextTypes.DEFAULT_TYPE) -> Storage:
+    return ctx.application.bot_data["storage"]
+
+
+async def alerts_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    arg = (ctx.args[0].lower() if ctx.args else "on")
+    chat_id = update.effective_chat.id
+    if arg == "off":
+        await _storage(ctx).unsubscribe(chat_id)
+        await update.effective_message.reply_text("🔕 Alerts off. Send /alerts on to turn them back on.")
+        return
+    await _storage(ctx).subscribe(chat_id)
+    s = _settings(ctx)
+    await update.effective_message.reply_text(
+        f"🔔 Alerts on. Every day at {s.scan_time} ({s.timezone}) I scan today's and tomorrow's matches and "
+        "message you any new corners lead, re-check it 1 hour before kick-off, and send the result after the match.\n"
+        "Leads are experimental: paper-trade them and watch /record.")
+
+
+async def record_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    st = _storage(ctx)
+    text = scorecard_text(await st.all_settled(), await st.open_leads(), await st.recent_leads(10))
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+def _parse_odds(raw: str) -> float | None:
+    try:
+        v = float(raw.replace(",", "."))
+    except ValueError:
+        return None
+    return v if v > 1.0 else None
+
+
+async def value_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    args = ctx.args or []
+    st = _storage(ctx)
+    lead = None
+    if len(args) == 2 and args[0].isdigit():
+        odds = _parse_odds(args[1])
+        lead = await st.lead_for(int(args[0]))
+        if lead is None:
+            # No recorded lead: analyse now
+            try:
+                a = await analyse_fixture(_client(ctx), _store(ctx), int(args[0]))
+            except SportmonksError as e:
+                await update.effective_message.reply_text(f"Couldn't analyse that fixture: {e}")
+                return
+            if not a.corners_lead:
+                await update.effective_message.reply_text(
+                    "There's no corners lead for that match, so there's no bet to check. "
+                    "For other markets use the fair odds in /predict: only odds ABOVE the fair odds have value.")
+                return
+            ld = a.corners_lead
+            label, prob = f"{ld.side} {ld.line:g} corners", ld.prob
+            teams = f"{a.home} vs {a.away}"
+        else:
+            label, prob, teams = lead.label, lead.prob, f"{lead.home} vs {lead.away}"
+    elif len(args) == 1:
+        odds = _parse_odds(args[0])
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        upcoming = [l for l in await st.open_leads() if l.kickoff > now]
+        if not upcoming:
+            await update.effective_message.reply_text("There's no upcoming lead right now. Use /value <fixture_id> <odds>.")
+            return
+        lead = upcoming[0]
+        label, prob, teams = lead.label, lead.prob, f"{lead.home} vs {lead.away}"
+    else:
+        await update.effective_message.reply_text("Usage: /value <odds>   or   /value <fixture_id> <odds>\nExample: /value 1.85")
+        return
+    if odds is None:
+        await update.effective_message.reply_text("Odds must be a number above 1, like 1.85")
+        return
+    edge = prob * odds - 1
+    min_price = (1 + CORNERS_MIN_EDGE) / prob
+    if edge >= CORNERS_MIN_EDGE:
+        verdict = f"✅ <b>Good value</b> — {edge:+.0%} expected edge."
+    elif edge > 0:
+        verdict = f"🟡 <b>Marginal</b> — only {edge:+.0%} edge; below our {CORNERS_MIN_EDGE:.0%} safety margin. Skip."
+    else:
+        verdict = f"❌ <b>No value</b> — {edge:+.0%}. Skip."
+    await update.effective_message.reply_text(
+        f"<b>{escape(teams)}</b>: {escape(label)}\n"
+        f"Our chance {prob:.0%} · fair odds {1 / prob:.2f} · take only at <b>{min_price:.2f}+</b>\n"
+        f"Your odds {odds:.2f} → {verdict}\n<i>Paper-trade only until /record proves the edge.</i>",
+        parse_mode=ParseMode.HTML)
+
+
 async def team_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     name = " ".join(ctx.args or []).strip()
     if not name:
@@ -235,10 +329,14 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
 
     builder = Application.builder().token(settings.telegram_token)
     # In webhook mode our own web server feeds updates in, so no built-in Updater is needed.
-    app = (builder.updater(None) if webhook else builder.post_shutdown(_shutdown)).build()
+    if webhook:
+        app = builder.updater(None).build()  # server.py starts the background jobs itself
+    else:
+        app = builder.post_init(start_background).post_shutdown(_shutdown).build()
     app.bot_data["settings"] = settings
     app.bot_data["client"] = client
     app.bot_data["store"] = HistoryStore(client)
+    app.bot_data["storage"] = Storage(settings.database_url)
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("fixtures", fixtures_cmd))
@@ -246,6 +344,9 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
     app.add_handler(CommandHandler("tips", tips))
     app.add_handler(CommandHandler("team", team_cmd))
     app.add_handler(CommandHandler("remind", remind_cmd))
+    app.add_handler(CommandHandler("alerts", alerts_cmd))
+    app.add_handler(CommandHandler("record", record_cmd))
+    app.add_handler(CommandHandler("value", value_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_error_handler(on_error)
     return app
