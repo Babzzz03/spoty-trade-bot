@@ -17,6 +17,7 @@ class Settings:
     default_league_ids: list[int] = field(default_factory=list)
     database_url: str = ""
     scan_time: str = "08:00"  # local time for the daily scan, HH:MM
+    allowed_chat_ids: list[int] = field(default_factory=list)  # empty = anyone may use the bot
 
 
 def load_settings() -> Settings:
@@ -33,4 +34,5 @@ def load_settings() -> Settings:
         default_league_ids=leagues,
         database_url=os.getenv("DATABASE_URL", "").strip(),
         scan_time=os.getenv("SCAN_TIME", "08:00").strip() or "08:00",
+        allowed_chat_ids=[int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").replace(" ", "").split(",") if x],
     )

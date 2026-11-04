@@ -101,3 +101,32 @@ def test_scan_alert_and_settle_flow(tmp_path, monkeypatch):
         assert "WON" in sent[-1][1]
 
     asyncio.run(run())
+
+
+def test_gatekeeper_blocks_strangers():
+    from types import SimpleNamespace
+
+    import pytest
+    from telegram import Update
+    from telegram.ext import ApplicationHandlerStop
+
+    from spotybot.bot import gatekeeper
+    from spotybot.config import Settings
+
+    replies = []
+
+    class Msg:
+        async def reply_text(self, text, **kw):
+            replies.append(text)
+
+    def update(chat_id):
+        u = Update.__new__(Update)
+        object.__setattr__(u, "_effective_chat", SimpleNamespace(id=chat_id))
+        object.__setattr__(u, "_effective_message", Msg())
+        return u
+
+    ctx = SimpleNamespace(application=SimpleNamespace(bot_data={"settings": Settings("x", "y", allowed_chat_ids=[1])}))
+    asyncio.run(gatekeeper(update(1), ctx))  # owner: passes
+    with pytest.raises(ApplicationHandlerStop):
+        asyncio.run(gatekeeper(update(2), ctx))
+    assert replies and "private bot" in replies[0]

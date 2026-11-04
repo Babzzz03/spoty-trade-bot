@@ -85,8 +85,10 @@ python -m spotybot.bot
 
 1. Push this repo to GitHub. That's already done.
 2. In Render, click **New → Blueprint** and select this repo.
-3. When prompted, enter `SPORTMONKS_API_TOKEN` and `TELEGRAM_BOT_TOKEN`.
+3. When prompted, enter `SPORTMONKS_API_TOKEN`, `TELEGRAM_BOT_TOKEN` and `DATABASE_URL` (see below). Leave `ALLOWED_CHAT_IDS` empty for now.
 4. Deploy. The bot registers its webhook automatically, using the `RENDER_EXTERNAL_URL` that Render sets.
+5. Send `/start` to your bot. It replies with your chat ID. Set `ALLOWED_CHAT_IDS` to that number in Render so that only you can use the bot. This protects your Sportmonks request allowance and your alerts.
+6. Send `/alerts on`.
 
 ### Keep the scorecard: free Supabase database
 

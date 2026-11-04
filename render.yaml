@@ -23,3 +23,5 @@ services:
         sync: false
       - key: SCAN_TIME           # daily lead scan, local time
         value: "08:00"
+      - key: ALLOWED_CHAT_IDS    # your Telegram chat ID (the bot shows it on /start); keeps the bot private
+        sync: false

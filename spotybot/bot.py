@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes,
+                          TypeHandler)
 
 from .alerts import scorecard_text, start_background
 from .analysis import CORNERS_MIN_EDGE, analyse_fixture, best_tips
@@ -58,7 +59,24 @@ def _today(tz: str) -> date:
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(HELP, parse_mode=ParseMode.HTML)
+    chat_id = update.effective_chat.id
+    extra = ""
+    if not _settings(ctx).allowed_chat_ids:
+        extra = (f"\n\n🔓 This bot is open to anyone. Your chat ID is <code>{chat_id}</code> — set "
+                 f"ALLOWED_CHAT_IDS={chat_id} on the server to make it private.")
+    await update.effective_message.reply_text(HELP + extra, parse_mode=ParseMode.HTML)
+
+
+async def gatekeeper(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs before every handler: if ALLOWED_CHAT_IDS is set, ignore everyone else."""
+    allowed = ctx.application.bot_data["settings"].allowed_chat_ids
+    if not allowed or not isinstance(update, Update) or update.effective_chat is None:
+        return
+    if update.effective_chat.id not in allowed:
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                f"This is a private bot. (Your chat ID: {update.effective_chat.id})")
+        raise ApplicationHandlerStop
 
 
 async def _send_fixture_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE, day: date, page: int, edit: bool) -> None:
@@ -337,6 +355,7 @@ def build_app(settings: Settings, webhook: bool = False) -> Application:
     app.bot_data["client"] = client
     app.bot_data["store"] = HistoryStore(client)
     app.bot_data["storage"] = Storage(settings.database_url)
+    app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("fixtures", fixtures_cmd))
