@@ -9,7 +9,7 @@ A Telegram bot that uses the [Sportmonks Football API v3](https://docs.sportmonk
 | `/upcoming` | All matches in the next 7 days, grouped by day, with a button per match for its prediction. Each day has a `/tips_YYYYMMDD` link for that day's predictions |
 | `/today` | Today's fixtures, with a button per match to analyse it. On days without matches it shows `/upcoming` |
 | `/fixtures 2026-11-08` | Fixtures on a given date |
-| `/predict <fixture_id>` | A **simple prediction** in plain words: winner, over/under 2.5 goals and both teams to score, each with its chance and the **lowest SportyBet odds worth taking**. Tap **📊 Full details** for every market (over and under, 1.5/2.5/3.5, corners, cards), form, head-to-head and the verdict |
+| `/predict <fixture_id>` | A **simple prediction** in plain words: winner, the expected **goal range** with the best Over line and the best Under line for that match (the highest Over and lowest Under that are each at least 60% likely, e.g. "Over 1.5 · Under 3.5 → 2–3 goals"), and both teams to score, each with its chance and the **lowest SportyBet odds worth taking**. Tap **📊 Full details** for every market (over and under, 1.5/2.5/3.5, corners, cards), form, head-to-head and the verdict |
 | `/tips [YYYY-MM-DD]` | A predictions overview for a day (default today): the most likely result, over 2.5 goals and any corners lead |
 | `/remind <fixture_id>` | Sends a fresh analysis 1 hour before kick-off, when line-ups are usually out. Also available as a button under each analysis |
 | `/team <name>` | Looks up a team's Sportmonks ID |

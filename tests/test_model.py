@@ -147,7 +147,7 @@ def test_analyse_fixture_end_to_end_with_mock_api():
     from spotybot.formatting import likely_word, simple_message
     assert likely_word(0.54).startswith("close call") and likely_word(0.80) == "very likely"
     simple = simple_message(a, "Africa/Lagos")
-    assert "PREDICTION" in simple and "Safer goals pick" in simple
+    assert "PREDICTION" in simple and "Goals" in simple
 
 
 def test_health_and_webhook_routes():
@@ -174,3 +174,24 @@ def test_power_margin_removal():
     assert p[0] > prop[0] and p[2] < prop[2]  # long shot carries more of the margin
     tw = TwoWay(Side([1.02, 1.02]), Side([7.9, 7.9]))
     assert tw.overround > 0.09  # too much margin -> analysis falls back to our model
+
+
+
+def test_goal_picks_choose_lines_per_match():
+    from types import SimpleNamespace
+
+    from spotybot.formatting import goal_picks, goal_range
+
+    def a(**lines):
+        return SimpleNamespace(goals=[SimpleNamespace(line=float(k[1:].replace("_", ".")), p_over=v)
+                                      for k, v in lines.items()])
+
+    # Aberdeen-like: O1.5 79%, O2.5 54%, O3.5 30% -> Over 1.5 + Under 3.5 -> 2-3 goals
+    over, under = goal_picks(a(l1_5=0.79, l2_5=0.54, l3_5=0.30))
+    assert over == (1.5, 0.79) and under[0] == 3.5 and goal_range(over, under) == "2–3 goals"
+    # Silkeborg-like: O2.5 61%, O3.5 38% -> Over 2.5 + Under 3.5 -> about 3 goals
+    over, under = goal_picks(a(l1_5=0.85, l2_5=0.61, l3_5=0.38))
+    assert over[0] == 2.5 and under[0] == 3.5 and goal_range(over, under) == "about 3 goals"
+    # Celtic-like: Under 4.5 needed
+    over, under = goal_picks(a(l1_5=0.89, l2_5=0.79, l3_5=0.57, l4_5=0.36))
+    assert over[0] == 2.5 and under[0] == 4.5 and goal_range(over, under) == "3–4 goals"

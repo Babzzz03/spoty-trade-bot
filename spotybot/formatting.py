@@ -166,32 +166,58 @@ def likely_word(p: float) -> str:
     return "most likely, but close"
 
 
-def safer_goals(a: Analysis, lean_over: bool) -> tuple[str, float] | None:
-    """A lower-risk goals line on the same side: Over 1.5 when leaning over, Under 3.5 when leaning under."""
-    line = 1.5 if lean_over else 3.5
-    r = next((r for r in a.goals if r.line == line), None)
-    if r is None:
-        return None
-    return (f"Over {line:g} goals", r.p_over) if lean_over else (f"Under {line:g} goals", 1 - r.p_over)
+GOAL_PICK_MIN = 0.60  # a goals line is only suggested when it is at least this likely
+
+
+def goal_picks(a: Analysis) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """Best Over line = highest line still >= 60% likely; best Under line = lowest line >= 60% likely.
+
+    Returns ((over_line, p), (under_line, p)); either can be None.
+    """
+    rows = {r.line: r.p_over for r in a.goals}
+    over = next(((l, rows[l]) for l in (3.5, 2.5, 1.5, 0.5) if l in rows and rows[l] >= GOAL_PICK_MIN), None)
+    under = next(((l, 1 - rows[l]) for l in (1.5, 2.5, 3.5, 4.5, 5.5) if l in rows and 1 - rows[l] >= GOAL_PICK_MIN),
+                 None)
+    return over, under
+
+
+def goal_range(over, under) -> str | None:
+    lo = int(over[0] + 0.5) if over else None
+    hi = int(under[0] - 0.5) if under else None
+    if lo is not None and hi is not None:
+        return f"about {lo} goals" if lo == hi else f"{lo}–{hi} goals"
+    if lo is not None:
+        return f"{lo} or more goals"
+    if hi is not None:
+        return f"{hi} or fewer goals"
+    return None
 
 
 def simple_picks(a: Analysis) -> list[tuple[str, str, str, float]]:
-    """(icon+market, pick, plain words, probability) for the three main markets."""
+    """(icon+market, pick, plain words, probability) for the main markets."""
     names = (f"{a.home} to win", "Draw", f"{a.away} to win")
     top = max(range(3), key=lambda k: a.result_probs[k])
     p = a.result_probs[top]
     picks = [("🏆 Winner", names[top], likely_word(p) if p >= 0.45 else "too close to call", p)]
-    g = next((r for r in a.goals if r.line == 2.5), None)
-    if g:
-        side, q = ("Over 2.5 goals", g.p_over) if g.p_over >= 0.5 else ("Under 2.5 goals", 1 - g.p_over)
-        picks.append(("⚽ Goals", side, likely_word(q), q))
-        safer = safer_goals(a, g.p_over >= 0.5)
-        if safer:
-            picks.append(("🛡️ Safer goals pick", safer[0], likely_word(safer[1]), safer[1]))
+    over, under = goal_picks(a)
+    if over:
+        picks.append(("📈 Goals (over)", f"Over {over[0]:g} goals", likely_word(over[1]), over[1]))
+    if under:
+        picks.append(("📉 Goals (under)", f"Under {under[0]:g} goals", likely_word(under[1]), under[1]))
+    if not over and not under:
+        g = next((r for r in a.goals if r.line == 2.5), None)
+        if g:
+            side, q = ("Over 2.5 goals", g.p_over) if g.p_over >= 0.5 else ("Under 2.5 goals", 1 - g.p_over)
+            picks.append(("⚽ Goals", side, likely_word(q), q))
     if a.btts:
         side, q = ("Yes", a.btts.p_over) if a.btts.p_over >= 0.5 else ("No", 1 - a.btts.p_over)
         picks.append(("🤝 Both teams score", side, likely_word(q), q))
     return picks
+
+
+def goals_summary(a: Analysis) -> str | None:
+    rng = goal_range(*goal_picks(a))
+    return f"⚽ Goals: expect <b>{rng}</b>" if rng else None
 
 
 def simple_message(a: Analysis, tz: str) -> str:
@@ -202,6 +228,8 @@ def simple_message(a: Analysis, tz: str) -> str:
          "🔮 <b>PREDICTION</b>"]
     for market, pick, words, p in picks:
         L.append(f"{market}: <b>{escape(pick)}</b> — {words} ({pct(p)})")
+        if market == "🏆 Winner" and goals_summary(a):
+            L.append(goals_summary(a))
     L += ["", "💰 <b>ONLY BET IF SPORTYBET'S ODDS ARE AT LEAST</b>"]
     for market, pick, _, p in picks:
         name = f"Both teams score – {pick}" if market.endswith("Both teams score") else pick
@@ -220,6 +248,8 @@ def tips_message(items: list[Analysis], tz: str, day=None) -> str:
     L = [f"🔮 <b>{title}</b>", ""]
     for a in items:
         L.append(f"⚽ <b>{escape(a.home)} vs {escape(a.away)}</b> · {kickoff_local(a.fixture, tz)}")
+        if goals_summary(a):
+            L.append("   " + goals_summary(a))
         for market, pick, words, p in simple_picks(a):
             L.append(f"   {market}: <b>{escape(pick)}</b> ({pct(p)}) — bet only at {(1 + VALUE_MIN_EDGE) / p:.2f}+")
         if a.corners_lead:
