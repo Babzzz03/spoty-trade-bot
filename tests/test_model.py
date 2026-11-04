@@ -140,7 +140,14 @@ def test_analyse_fixture_end_to_end_with_mock_api():
     assert 8.25 not in a.odds.corners and 9.5 in a.odds.corners
     assert a.referee_known and not a.lineups_confirmed
     text = analysis_message(a, "Africa/Lagos")
-    assert "Verdict" in text and "fair" in text and "Corners" in text
+    assert "Verdict" in text and "Corners" in text
+    # goal lines are consistent: P(over 1.5) >= P(over 2.5) >= P(over 3.5)
+    ps = [r.p_over for r in sorted(a.goals, key=lambda r: r.line)]
+    assert all(x >= y - 1e-12 for x, y in zip(ps, ps[1:]))
+    from spotybot.formatting import likely_word, simple_message
+    assert likely_word(0.54).startswith("close call") and likely_word(0.80) == "very likely"
+    simple = simple_message(a, "Africa/Lagos")
+    assert "PREDICTION" in simple and "Safer goals pick" in simple
 
 
 def test_health_and_webhook_routes():

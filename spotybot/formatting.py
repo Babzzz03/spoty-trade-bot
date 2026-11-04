@@ -157,11 +157,22 @@ def analysis_message(a: Analysis, tz: str) -> str:
 def likely_word(p: float) -> str:
     if p >= 0.75:
         return "very likely"
-    if p >= 0.60:
+    if p >= 0.62:
         return "likely"
-    if p >= 0.50:
+    if p >= 0.56:
         return "slightly more likely"
+    if p >= 0.50:
+        return "close call — almost 50/50"
     return "most likely, but close"
+
+
+def safer_goals(a: Analysis, lean_over: bool) -> tuple[str, float] | None:
+    """A lower-risk goals line on the same side: Over 1.5 when leaning over, Under 3.5 when leaning under."""
+    line = 1.5 if lean_over else 3.5
+    r = next((r for r in a.goals if r.line == line), None)
+    if r is None:
+        return None
+    return (f"Over {line:g} goals", r.p_over) if lean_over else (f"Under {line:g} goals", 1 - r.p_over)
 
 
 def simple_picks(a: Analysis) -> list[tuple[str, str, str, float]]:
@@ -174,6 +185,9 @@ def simple_picks(a: Analysis) -> list[tuple[str, str, str, float]]:
     if g:
         side, q = ("Over 2.5 goals", g.p_over) if g.p_over >= 0.5 else ("Under 2.5 goals", 1 - g.p_over)
         picks.append(("⚽ Goals", side, likely_word(q), q))
+        safer = safer_goals(a, g.p_over >= 0.5)
+        if safer:
+            picks.append(("🛡️ Safer goals pick", safer[0], likely_word(safer[1]), safer[1]))
     if a.btts:
         side, q = ("Yes", a.btts.p_over) if a.btts.p_over >= 0.5 else ("No", 1 - a.btts.p_over)
         picks.append(("🤝 Both teams score", side, likely_word(q), q))

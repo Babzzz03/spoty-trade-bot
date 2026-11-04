@@ -159,6 +159,16 @@ def build_analysis(fixture: dict, home: dict, away: dict, lm: LeagueModel, kicko
             continue
         a.goals.append(LineRow(line, mk.prob_yes if mk else model_goals[line], "market" if mk else "model",
                                model_goals.get(line), o))
+    # P(over) must not increase with the line (e.g. O1.5 >= O2.5 >= O3.5). Mixed sources (market on one
+    # line, our model on another) can break that, so enforce it, trusting market lines over model lines.
+    a.goals.sort(key=lambda r: r.line)
+    for i in range(len(a.goals) - 1, 0, -1):
+        lo, hi = a.goals[i - 1], a.goals[i]
+        if lo.p_over < hi.p_over:
+            if lo.source == "model" or hi.source == "market":
+                lo.p_over = hi.p_over
+            else:
+                hi.p_over = lo.p_over
     bt = _usable(odds.btts)
     a.btts = LineRow(0, bt.prob_yes if bt else model.btts, "market" if bt else "model", model.btts, odds.btts)
 
