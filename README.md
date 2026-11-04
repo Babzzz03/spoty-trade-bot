@@ -66,7 +66,14 @@ python -m spotybot.bot
 3. When prompted, enter `SPORTMONKS_API_TOKEN` and `TELEGRAM_BOT_TOKEN`.
 4. Deploy. The bot registers its webhook automatically, using the `RENDER_EXTERNAL_URL` that Render sets.
 
-Free web services sleep after about 15 minutes without traffic, so the first reply after a quiet spell can take about a minute. If you want instant replies, switch the service to a paid plan.
+### Keep it awake
+
+Free Render services sleep after about 15 minutes without traffic. To keep yours awake, add a job at [cron-job.org](https://cron-job.org):
+
+- **URL:** `https://<your-service>.onrender.com/health`. The response is `{"status":"ok", ...}`.
+- **Schedule:** every 10 minutes.
+
+Render's free tier includes 750 hours a month, which is enough for one service running all the time.
 
 Run the bot without `RENDER_EXTERNAL_URL` or `WEBHOOK_URL` set and it uses polling instead, which is what you want for local runs.
 

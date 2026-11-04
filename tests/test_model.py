@@ -100,3 +100,18 @@ def test_analyse_fixture_end_to_end_with_mock_api():
     assert pred.home_form.matches == 8 and pred.away_form.matches == 8
     assert len(pred.h2h) == 1
     assert pred.p_home > pred.p_away
+
+
+def test_health_and_webhook_routes():
+    from starlette.testclient import TestClient
+    from telegram.ext import Application
+    from spotybot.server import build_web_app
+
+    app = Application.builder().token("123:abc").updater(None).build()
+    client = TestClient(build_web_app(app, "s3cret"))
+    r = client.get("/health")
+    assert r.status_code == 200 and r.json()["status"] == "ok"
+    assert client.head("/health").status_code == 200
+    assert client.get("/").status_code == 200
+    assert client.post("/telegram/s3cret", json={}, headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"}).status_code == 403
+    assert client.post("/telegram/other", json={}).status_code == 404

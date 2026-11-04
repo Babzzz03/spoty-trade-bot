@@ -1,7 +1,6 @@
 """Telegram bot entry point.  Run with:  python -m spotybot.bot"""
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 from datetime import date, datetime
@@ -185,13 +184,15 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("Unhandled error", exc_info=ctx.error)
 
 
-def build_app(settings: Settings) -> Application:
+def build_app(settings: Settings, webhook: bool = False) -> Application:
     client = SportmonksClient(settings.sportmonks_token)
 
     async def _shutdown(app: Application) -> None:
         await client.close()
 
-    app = Application.builder().token(settings.telegram_token).post_shutdown(_shutdown).build()
+    builder = Application.builder().token(settings.telegram_token)
+    # In webhook mode our own web server feeds updates in, so no built-in Updater is needed.
+    app = (builder.updater(None) if webhook else builder.post_shutdown(_shutdown)).build()
     app.bot_data["settings"] = settings
     app.bot_data["client"] = client
     app.add_handler(CommandHandler(["start", "help"], start))
@@ -207,24 +208,27 @@ def build_app(settings: Settings) -> Application:
 
 def main() -> None:
     settings = load_settings()
-    app = build_app(settings)
     # Webhook mode on a web host (Render sets RENDER_EXTERNAL_URL automatically for web services).
     base_url = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
     if base_url:
-        secret = hashlib.sha256(settings.telegram_token.encode()).hexdigest()[:32]
+        import asyncio
+
+        from .server import run_webhook_server
+
         port = int(os.getenv("PORT", "10000"))
         log.info("Starting Spoty Trade Bot in webhook mode on port %s (tz=%s)", port, settings.timezone)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=f"telegram/{secret}",
-            webhook_url=f"{base_url}/telegram/{secret}",
-            secret_token=secret,
-            allowed_updates=Update.ALL_TYPES,
-        )
+        app = build_app(settings, webhook=True)
+
+        async def _run() -> None:
+            try:
+                await run_webhook_server(app, base_url, port, settings.telegram_token)
+            finally:
+                await app.bot_data["client"].close()
+
+        asyncio.run(_run())
     else:
         log.info("Starting Spoty Trade Bot in polling mode (tz=%s)", settings.timezone)
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        build_app(settings).run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
